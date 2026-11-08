@@ -1,10 +1,13 @@
 mod app;
 mod chats;
 mod draw;
+mod history;
+mod hl;
 mod lessons;
 mod mcp;
 mod mesh;
 mod model;
+mod sixel;
 mod term;
 mod ui;
 

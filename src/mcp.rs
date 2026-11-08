@@ -81,6 +81,11 @@ fn call(line: &str, home: &Path) -> String {
                         preview.mark.bytes,
                         preview.picture
                     );
+                    let text = if preview.sixel.is_empty() {
+                        text
+                    } else {
+                        format!("{text}\n{}", preview.sixel)
+                    };
                     format!(
                         "{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}",
                         quote(&text)

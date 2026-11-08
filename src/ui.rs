@@ -123,7 +123,18 @@ impl Screen {
     fn line(&mut self, y: usize, cols: usize, text: &str, ink: &str) {
         self.frame.push_str(&format!("\x1b[{};1H{ink}", y + 1));
         let mut count = 0usize;
-        for ch in text.chars() {
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                self.frame.push(ch);
+                for next in chars.by_ref() {
+                    self.frame.push(next);
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
             if count + 1 >= cols {
                 break;
             }

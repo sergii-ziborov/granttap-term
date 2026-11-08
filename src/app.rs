@@ -3,6 +3,8 @@ use std::process::Command;
 
 use crate::chats::{self, files};
 use crate::draw;
+use crate::history::History;
+use crate::hl;
 use crate::lessons;
 use crate::mesh;
 use crate::model::{AcceptLevel, AgentKind, Permit, Section, Task};
@@ -29,7 +31,7 @@ pub struct App {
     pub dir: PathBuf,
     pub desc_open: bool,
     home: PathBuf,
-    history: Vec<String>,
+    history: History,
     chats: Vec<crate::model::Chat>,
     tasks: Vec<Task>,
     images: Vec<crate::model::ImageMark>,
@@ -99,7 +101,7 @@ impl App {
             dir,
             desc_open: false,
             home,
-            history: Vec::new(),
+            history: History::default(),
             chats,
             tasks: Vec::new(),
             images: Vec::new(),
@@ -174,7 +176,10 @@ impl App {
     }
 
     pub fn lines(&self) -> Vec<String> {
-        if let Mode::View { lines } | Mode::Split { lines } = &self.mode {
+        if let Mode::View { lines } = &self.mode {
+            return lines.iter().map(|line| hl::paint(line)).collect();
+        }
+        if let Mode::Split { lines } = &self.mode {
             return lines.clone();
         }
         if self.desc_open {
@@ -260,6 +265,20 @@ impl App {
                 Effect::None
             }
             Key::CtrlV => Effect::None,
+            Key::CtrlP => {
+                if let Some(line) = self.history.previous(&self.cmd) {
+                    self.cmd = line;
+                    self.suggest = 0;
+                }
+                Effect::None
+            }
+            Key::CtrlN => {
+                if let Some(line) = self.history.next() {
+                    self.cmd = line;
+                    self.suggest = 0;
+                }
+                Effect::None
+            }
             Key::Paste(text) => {
                 self.paste_image(&text);
                 Effect::None
@@ -356,7 +375,7 @@ impl App {
     fn activate(&mut self) -> Effect {
         if !self.cmd.is_empty() {
             let line = self.cmd.clone();
-            self.history.push(line.clone());
+            self.history.push(&line);
             self.run(&line);
             self.cmd.clear();
             return Effect::None;
@@ -661,5 +680,16 @@ mod tests {
         let effect = app.on_key(Key::F(4));
         assert!(matches!(effect, Effect::None));
         assert_eq!(app.note, "Vim is off.");
+    }
+
+    #[test]
+    fn control_p_recalls_the_last_command() {
+        let mut app = App::new(PathBuf::from("."), PathBuf::from("/nowhere-home"));
+        app.cmd = "mesh".into();
+        app.on_key(Key::Enter);
+        app.on_key(Key::CtrlP);
+        assert_eq!(app.cmd, "mesh");
+        app.on_key(Key::CtrlN);
+        assert!(app.cmd.is_empty());
     }
 }

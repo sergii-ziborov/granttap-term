@@ -15,6 +15,8 @@ pub enum Key {
     End,
     F(u8),
     CtrlC,
+    CtrlN,
+    CtrlP,
     CtrlV,
     Click { x: usize, y: usize },
     Wheel(i8),
@@ -202,6 +204,8 @@ impl Decoder {
         self.pending_esc = false;
         match byte {
             0x03 => keys.push(Key::CtrlC),
+            0x0e => keys.push(Key::CtrlN),
+            0x10 => keys.push(Key::CtrlP),
             0x16 => keys.push(Key::CtrlV),
             0x09 => keys.push(Key::Tab),
             0x0d | 0x0a => keys.push(Key::Enter),
