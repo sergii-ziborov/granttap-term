@@ -1,0 +1,15 @@
+[package]
+name = "granttap-term"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+# panic stays unwind so Drop can restore the terminal
