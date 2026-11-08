@@ -44,6 +44,67 @@ fn mark_live(home: &Path, chats: &mut Vec<Chat>) {
             },
         );
     }
+    mark_cli_live(chats, &cli_commands());
+    chats.sort_by_key(|chat| std::cmp::Reverse(chat.live));
+}
+
+fn cli_commands() -> String {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-ax", "-o", "command="])
+        .output()
+    else {
+        return String::new();
+    };
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if text.len() > 256 * 1024 {
+        text.truncate(256 * 1024);
+    }
+    text
+}
+
+fn mark_cli_live(chats: &mut [Chat], ps: &str) {
+    for chat in chats.iter_mut() {
+        if chat.live || chat.id.len() < 8 {
+            continue;
+        }
+        let name = match chat.agent {
+            AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
+            AgentKind::Grok => continue,
+        };
+        if ps
+            .lines()
+            .any(|line| is_cli(line, name) && contains_id(line, &chat.id))
+        {
+            chat.live = true;
+        }
+    }
+}
+
+fn is_cli(line: &str, name: &str) -> bool {
+    let token = line.split_whitespace().next().unwrap_or("");
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    base == name
+}
+
+fn contains_id(line: &str, id: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while let Some(found) = line[start..].find(id) {
+        let at = start + found;
+        let before = at == 0 || !is_id_byte(bytes[at - 1]);
+        let after_at = at + id.len();
+        let after = after_at >= bytes.len() || !is_id_byte(bytes[after_at]);
+        if before && after {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
+}
+
+fn is_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
 }
 
 fn load_codex(index: &Path, out: &mut Vec<Chat>) {
@@ -315,11 +376,19 @@ fn icon(name: &str, dir: bool) -> char {
     match name.rsplit_once('.').map(|(_, ext)| ext) {
         Some("rs") => 'R',
         Some("py") => 'P',
+        Some("go") => 'G',
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx") => 'S',
+        Some("html" | "htm" | "vue" | "svelte") => 'H',
+        Some("css") => '%',
         Some("md") => 'M',
         Some("json") => 'J',
         Some("toml") => 'T',
-        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") => 'I',
-        Some("sh") => '$',
+        Some("yml" | "yaml") => 'Y',
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => 'I',
+        Some("sh" | "bash" | "zsh") => '$',
+        Some("c" | "h" | "cpp" | "hpp") => 'C',
+        Some("java" | "kt" | "swift") => 'K',
+        Some("sql") => 'Q',
         _ => '.',
     }
 }
@@ -411,15 +480,50 @@ mod tests {
             ),
         )
         .unwrap();
+        fs::write(home.join(".claude/projects/demo/abc.jsonl"), "{}\n").unwrap();
         let chats = load(&home);
         let chat = chats.iter().find(|chat| chat.id == "one").unwrap();
         assert_eq!(chat.title, "Desk towers");
         assert!(chat.live);
+        let live_at = chats.iter().position(|chat| chat.id == "one").unwrap();
+        let idle_at = chats.iter().position(|chat| chat.id == "abc").unwrap();
+        assert!(live_at < idle_at);
         let path = write_handoff(&home, chat, AgentKind::Claude).unwrap();
         let text = fs::read_to_string(path).unwrap();
         assert!(text.contains("from Grok"));
         assert!(text.contains("to Claude"));
         assert!(text.contains("hello from the chat"));
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn cli_argv_marks_the_matching_agent_only() {
+        let chat = |agent, id: &str| Chat {
+            agent,
+            id: id.into(),
+            title: id.into(),
+            path: PathBuf::new(),
+            live: false,
+        };
+        let mut chats = vec![
+            chat(AgentKind::Claude, "01234567-abcd"),
+            chat(AgentKind::Claude, "99999999-zzzz"),
+            chat(AgentKind::Codex, "01234567-abcd"),
+        ];
+        let ps = "Claude Helper (Renderer) --session 01234567-abcd\n/opt/bin/claude --resume 01234567-abcd\n";
+        mark_cli_live(&mut chats, ps);
+        assert!(chats[0].live);
+        assert!(!chats[1].live);
+        assert!(!chats[2].live);
+    }
+
+    #[test]
+    fn icons_follow_the_file_type() {
+        assert_eq!(icon("main.rs", false), 'R');
+        assert_eq!(icon("main.py", false), 'P');
+        assert_eq!(icon("main.go", false), 'G');
+        assert_eq!(icon("app.tsx", false), 'S');
+        assert_eq!(icon("page.html", false), 'H');
+        assert_eq!(icon("src", true), '>');
     }
 }

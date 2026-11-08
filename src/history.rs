@@ -9,6 +9,23 @@ pub struct History {
 }
 
 impl History {
+    pub fn seed(lines: Vec<String>) -> Self {
+        let mut lines = lines;
+        if lines.len() > CAP {
+            let skip = lines.len() - CAP;
+            lines.drain(0..skip);
+        }
+        Self {
+            lines,
+            pos: None,
+            draft: String::new(),
+        }
+    }
+
+    pub fn stored(&self) -> &[String] {
+        &self.lines
+    }
+
     pub fn push(&mut self, line: &str) {
         if line.is_empty() {
             return;

@@ -125,6 +125,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("history", "Read recent commits through Weavatrix git."),
     ("blob", "Read a file at HEAD through Weavatrix git: blob <path>."),
     ("health", "Toggle mesh code-health: health roads, or health extern."),
+    ("skill", "Open a shared skill file: skill <name>."),
     (
         "commit",
         "Commit with git commit. Stages nothing; only what is already staged is committed.",
@@ -161,9 +162,9 @@ impl App {
             desc_open: false,
             fill: false,
             home: home.clone(),
-            history: History::default(),
+            history: History::seed(stored.history.clone()),
             chats,
-            tasks: Vec::new(),
+            tasks: stored.tasks.clone(),
             images: Vec::new(),
             preview: String::new(),
             page: Vec::new(),
@@ -236,9 +237,15 @@ impl App {
             found.clear();
             let head = self.cmd.split_whitespace().next().unwrap_or("");
             push_second(&mut found, head, "");
+            if head == "skill" {
+                push_skills(&mut found, &self.skills, "");
+            }
         } else if let Some((head, partial)) = self.cmd.split_once(' ') {
             found.clear();
             push_second(&mut found, head, partial.trim());
+            if head == "skill" {
+                push_skills(&mut found, &self.skills, partial.trim());
+            }
         }
         found.truncate(6);
         found
@@ -275,7 +282,7 @@ impl App {
 
     pub fn lines(&self) -> Vec<String> {
         if let Mode::View { lines } = &self.mode {
-            return lines.iter().map(|line| paint_line(line)).collect();
+            return paint_view(lines);
         }
         if let Mode::Split { lines, .. } = &self.mode {
             return lines.clone();
@@ -689,6 +696,7 @@ impl App {
             let line = self.cmd.clone();
             if self.run(&line) {
                 self.history.push(&line);
+                self.persist();
                 self.cmd.clear();
                 self.confirm.clear();
             }
@@ -697,6 +705,8 @@ impl App {
         match self.section {
             Section::Files => self.open_file(false),
             Section::Chats => self.open_chat(false),
+            Section::Tasks => self.open_task(),
+            Section::Mesh => self.open_mesh_row(),
             Section::Lessons => self.open_lesson(),
             Section::Browser => {
                 if !self.page.is_empty() {
@@ -704,7 +714,6 @@ impl App {
                 }
                 Effect::None
             }
-            _ => Effect::None,
         }
     }
 
@@ -772,6 +781,7 @@ impl App {
             "history" => self.show_history(),
             "blob" => self.show_blob(&rest),
             "health" => self.health_cmd(&rest),
+            "skill" => self.open_skill_named(&rest),
             "commit" => {
                 if self.blocked(line) {
                     return false;
@@ -1129,6 +1139,71 @@ impl App {
         Effect::None
     }
 
+    fn open_task(&mut self) -> Effect {
+        if self.cursor < 4 {
+            return Effect::None;
+        }
+        let Some(task) = self.tasks.get(self.cursor - 4).cloned() else {
+            return Effect::None;
+        };
+        let body = vec![
+            format!("owner  {}", task.owner.label()),
+            format!("model  {}", task.model),
+            format!("effort  {}", task.effort),
+            "Opened.".into(),
+        ];
+        self.open_split(dress(task.owner, &task.title, body), Some(task.owner));
+        Effect::None
+    }
+
+    fn open_skill_named(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.open_mesh_row();
+            if matches!(self.mode, Mode::Desk) && self.note.is_empty() {
+                self.note = "skill needs a name".into();
+            }
+            return;
+        }
+        let Some(skill) = self.skills.iter().find(|skill| skill.name == name).cloned() else {
+            self.note = format!("No skill {name}.");
+            return;
+        };
+        self.show_skill(&skill);
+    }
+
+    fn open_mesh_row(&mut self) -> Effect {
+        let Some(line) = self.mesh_view.get(self.cursor).cloned() else {
+            return Effect::None;
+        };
+        let Some(rest) = line.strip_prefix("  ") else {
+            return Effect::None;
+        };
+        let Some((agent, name)) = rest.split_once("  ") else {
+            return Effect::None;
+        };
+        let Some(skill) = self
+            .skills
+            .iter()
+            .find(|skill| skill.agent == agent && skill.name == name)
+            .cloned()
+        else {
+            return Effect::None;
+        };
+        self.show_skill(&skill);
+        Effect::None
+    }
+
+    fn show_skill(&mut self, skill: &crate::skills::Skill) {
+        let Ok(text) = std::fs::read_to_string(&skill.path) else {
+            self.note = "Skill file is missing.".into();
+            return;
+        };
+        let mut lines = vec![format!("{}  {}", skill.agent, skill.name)];
+        lines.extend(text.lines().take(120).map(str::to_string));
+        self.open_split(lines, None);
+    }
+
     fn open_lesson(&mut self) -> Effect {
         let Some(lesson) = lessons::lessons().get(self.cursor) else {
             return Effect::None;
@@ -1276,6 +1351,8 @@ impl App {
             externals: self.externals,
             mesh_health: self.mesh_health.clone(),
             actions: self.actions.clone(),
+            tasks: self.tasks.clone(),
+            history: self.history.stored().to_vec(),
         };
         let _ = store::save(&self.home, &state);
     }
@@ -1285,7 +1362,24 @@ fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
-fn paint_line(line: &str) -> String {
+fn paint_view(lines: &[String]) -> Vec<String> {
+    let ext = view_ext(lines);
+    lines.iter().map(|line| paint_line(line, ext)).collect()
+}
+
+fn view_ext(lines: &[String]) -> &str {
+    for line in lines {
+        if let Some(path) = line.strip_prefix("where  ") {
+            return match path.rsplit_once('.') {
+                Some((_, ext)) if !ext.is_empty() && !ext.contains('/') => ext,
+                _ => "",
+            };
+        }
+    }
+    ""
+}
+
+fn paint_line(line: &str, ext: &str) -> String {
     if line.starts_with("where ")
         || line.starts_with("when ")
         || line.starts_with("what ")
@@ -1293,7 +1387,7 @@ fn paint_line(line: &str) -> String {
     {
         line.to_string()
     } else {
-        hl::paint(line)
+        hl::paint_ext(line, ext)
     }
 }
 
@@ -1306,6 +1400,17 @@ fn dress(agent: AgentKind, title: &str, body: Vec<String>) -> Vec<String> {
     let mut lines = vec![head, String::new()];
     lines.extend(body);
     lines
+}
+
+fn push_skills(found: &mut Vec<String>, skills: &[Skill], partial: &str) {
+    for skill in skills {
+        if skill.name.starts_with(partial) && skill.name != partial {
+            let line = format!("skill {}", skill.name);
+            if !found.contains(&line) {
+                found.push(line);
+            }
+        }
+    }
 }
 
 fn push_second(found: &mut Vec<String>, head: &str, partial: &str) {
@@ -1361,6 +1466,52 @@ mod tests {
         app.cmd = "move grok".into();
         app.on_key(Key::Enter);
         assert_eq!(app.chats[0].agent, AgentKind::Grok);
+    }
+
+    #[test]
+    fn task_opens_in_the_owner_split_and_survives_reload() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-queue-{n}"));
+        let dir = std::env::temp_dir().join(format!("granttap-queue-dir-{n}"));
+        std::fs::create_dir_all(home.join(".agents/skills/ship")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(home.join(".agents/skills/ship/SKILL.md"), "Keep the desk\n").unwrap();
+        let mut app = App::new(dir.clone(), home.clone());
+        app.chats.push(crate::model::Chat {
+            agent: AgentKind::Claude,
+            id: "abc".into(),
+            title: "abc".into(),
+            path: PathBuf::new(),
+            live: false,
+        });
+        app.cursor = 0;
+        app.cmd = "task write the desk".into();
+        app.on_key(Key::Enter);
+        assert_eq!(app.tasks[0].owner, AgentKind::Claude);
+        app.cursor = 4;
+        app.cmd.clear();
+        app.on_key(Key::Enter);
+        let Mode::Split { lines, agent } = &app.mode else {
+            panic!("task did not open");
+        };
+        assert_eq!(*agent, Some(AgentKind::Claude));
+        let joined = lines.join("\n");
+        assert!(joined.contains("write the desk"));
+        assert!(joined.contains("owner  Claude"));
+        app.cmd = "skill ship".into();
+        app.on_key(Key::Enter);
+        let joined = app.lines().join("\n");
+        assert!(joined.contains("Keep the desk"));
+        assert!(joined.contains("shared  ship"));
+        let mut again = App::new(dir, home.clone());
+        assert_eq!(again.tasks.len(), 1);
+        assert_eq!(again.tasks[0].title, "write the desk");
+        again.on_key(Key::CtrlP);
+        assert_eq!(again.cmd, "skill ship");
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

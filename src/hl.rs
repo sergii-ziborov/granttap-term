@@ -5,12 +5,28 @@ const INTEGER: &str = "\x1b[38;5;45m";
 const TEXT: &str = "\x1b[38;5;153m";
 const RESET: &str = "\x1b[0m";
 
-pub fn paint(line: &str) -> String {
+pub fn paint_ext(line: &str, ext: &str) -> String {
+    if ext.is_empty() {
+        return line.to_string();
+    }
     let bytes = line.as_bytes();
     let mut out = String::new();
     let mut color = "";
     let mut i = 0;
     while i < bytes.len() {
+        if bytes[i] == b'#' && hash_comment(ext) {
+            emit(&mut out, &mut color, COMMENT, &line[i..]);
+            break;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            let end = line[i + 2..]
+                .find("*/")
+                .map(|at| i + 2 + at + 2)
+                .unwrap_or(line.len());
+            emit(&mut out, &mut color, COMMENT, &line[i..end]);
+            i = end;
+            continue;
+        }
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             emit(&mut out, &mut color, COMMENT, &line[i..]);
             break;
@@ -30,7 +46,7 @@ pub fn paint(line: &str) -> String {
         } else if is_ident_start(bytes[i]) {
             let end = end_ident(bytes, i);
             let word = &line[i..end];
-            let ink = if is_keyword(word) { KEYWORD } else { TEXT };
+            let ink = if is_keyword(word, ext) { KEYWORD } else { TEXT };
             emit(&mut out, &mut color, ink, word);
             i = end;
         } else if bytes[i].is_ascii_digit() {
@@ -58,22 +74,169 @@ fn emit(out: &mut String, color: &mut &str, next: &'static str, text: &str) {
     out.push_str(text);
 }
 
-fn is_keyword(word: &str) -> bool {
+fn hash_comment(ext: &str) -> bool {
     matches!(
-        word,
-        "fn" | "let"
-            | "mut"
-            | "pub"
-            | "struct"
-            | "enum"
-            | "impl"
-            | "use"
-            | "mod"
-            | "if"
-            | "else"
-            | "return"
-            | "match"
+        ext,
+        "py" | "sh" | "bash" | "zsh" | "yml" | "yaml" | "toml" | "rb" | "pl" | "r"
     )
+}
+
+fn is_keyword(word: &str, ext: &str) -> bool {
+    match ext {
+        "py" => matches!(
+            word,
+            "def" | "class"
+                | "if"
+                | "elif"
+                | "else"
+                | "return"
+                | "import"
+                | "from"
+                | "for"
+                | "while"
+                | "pass"
+                | "break"
+                | "continue"
+                | "async"
+                | "await"
+                | "with"
+                | "as"
+                | "try"
+                | "except"
+                | "finally"
+                | "raise"
+                | "lambda"
+                | "yield"
+                | "True"
+                | "False"
+                | "None"
+                | "and"
+                | "or"
+                | "not"
+                | "in"
+                | "is"
+        ),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => matches!(
+            word,
+            "function" | "const"
+                | "let"
+                | "var"
+                | "if"
+                | "else"
+                | "return"
+                | "import"
+                | "from"
+                | "export"
+                | "class"
+                | "extends"
+                | "async"
+                | "await"
+                | "for"
+                | "while"
+                | "switch"
+                | "case"
+                | "break"
+                | "continue"
+                | "new"
+                | "this"
+                | "typeof"
+                | "interface"
+                | "type"
+        ),
+        "go" => matches!(
+            word,
+            "func" | "package"
+                | "import"
+                | "if"
+                | "else"
+                | "return"
+                | "for"
+                | "range"
+                | "type"
+                | "struct"
+                | "interface"
+                | "var"
+                | "const"
+                | "go"
+                | "defer"
+                | "switch"
+                | "case"
+                | "break"
+                | "continue"
+                | "map"
+                | "chan"
+        ),
+        "sh" | "bash" | "zsh" => matches!(
+            word,
+            "if" | "then"
+                | "else"
+                | "elif"
+                | "fi"
+                | "for"
+                | "while"
+                | "do"
+                | "done"
+                | "case"
+                | "esac"
+                | "function"
+                | "return"
+                | "in"
+        ),
+        "c" | "h" | "cpp" | "hpp" => matches!(
+            word,
+            "if" | "else"
+                | "return"
+                | "for"
+                | "while"
+                | "switch"
+                | "case"
+                | "break"
+                | "continue"
+                | "struct"
+                | "enum"
+                | "typedef"
+                | "const"
+                | "static"
+                | "void"
+                | "int"
+                | "char"
+        ),
+        _ => matches!(
+            word,
+            "fn" | "let"
+                | "mut"
+                | "pub"
+                | "struct"
+                | "enum"
+                | "impl"
+                | "use"
+                | "mod"
+                | "if"
+                | "else"
+                | "return"
+                | "match"
+                | "for"
+                | "while"
+                | "loop"
+                | "break"
+                | "continue"
+                | "async"
+                | "await"
+                | "trait"
+                | "type"
+                | "const"
+                | "static"
+                | "where"
+                | "in"
+                | "as"
+                | "ref"
+                | "move"
+                | "self"
+                | "Self"
+                | "true"
+                | "false"
+        ),
+    }
 }
 
 fn is_ident_start(byte: u8) -> bool {
@@ -201,16 +364,26 @@ mod tests {
 
     #[test]
     fn comment_contains_dim() {
-        assert!(paint("// keep the city").contains("38;5;67"));
+        assert!(paint_ext("// keep the city", "rs").contains("38;5;67"));
     }
 
     #[test]
     fn string_contains_blue() {
-        assert!(paint("\"neon\"").contains("38;5;39"));
+        assert!(paint_ext("\"neon\"", "rs").contains("38;5;39"));
     }
 
     #[test]
     fn fn_contains_red() {
-        assert!(paint("fn main() {}").contains("38;5;196"));
+        assert!(paint_ext("fn main() {}", "rs").contains("38;5;196"));
+    }
+
+    #[test]
+    fn python_js_and_shell_use_their_own_words() {
+        assert!(paint_ext("def run():", "py").contains("38;5;196"));
+        assert!(paint_ext("# keep", "py").contains("38;5;67"));
+        assert!(paint_ext("function run() {}", "js").contains("38;5;196"));
+        assert!(paint_ext("if true; then", "sh").contains("38;5;196"));
+        assert!(paint_ext("/* hide */ fn", "rs").contains("38;5;67"));
+        assert_eq!(paint_ext("if this is prose", ""), "if this is prose");
     }
 }

@@ -40,7 +40,7 @@ pub fn handle(line: &str, home: &Path) -> String {
     }
 }
 
-const TOOLS: &str = r#"{"tools":[{"name":"list_chats","description":"Local Grok, Claude, and Codex chats on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"preview_image","description":"Cell preview of a local image for a test.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},{"name":"git_history","description":"Recent commits through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"git_read_blob","description":"UTF-8 file at a revision through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"file":{"type":"string"},"revision":{"type":"string"}},"required":["file"]}},{"name":"browse_page","description":"Text rendering of a local page or http(s) URL for a test.","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},{"name":"list_mesh","description":"Repo, Weavatrix registry, and linked repos for a root.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"list_skills","description":"Claude, Codex, and shared skills visible on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"read_handoff","description":"Read a chat handoff written by move.","inputSchema":{"type":"object","properties":{"chat":{"type":"string"}},"required":["chat"]}}]}"#;
+const TOOLS: &str = r#"{"tools":[{"name":"list_chats","description":"Local Grok, Claude, and Codex chats on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"preview_image","description":"Cell preview of a local image for a test.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},{"name":"git_history","description":"Recent commits through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"git_read_blob","description":"UTF-8 file at a revision through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"file":{"type":"string"},"revision":{"type":"string"}},"required":["file"]}},{"name":"browse_page","description":"Text rendering of a local page or http(s) URL for a test.","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},{"name":"list_mesh","description":"Repo, Weavatrix registry, and linked repos for a root.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"list_skills","description":"Claude, Codex, and shared skills visible on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"read_handoff","description":"Read a chat handoff written by move.","inputSchema":{"type":"object","properties":{"chat":{"type":"string"}},"required":["chat"]}},{"name":"read_skill","description":"Read a Claude, Codex, or shared skill file.","inputSchema":{"type":"object","properties":{"skill":{"type":"string"}},"required":["skill"]}}]}"#;
 
 fn call(line: &str, home: &Path) -> String {
     let name = json_string(line, "name").unwrap_or_default();
@@ -128,6 +128,26 @@ fn call(line: &str, home: &Path) -> String {
             match chats::handoff_text(home, &chat) {
                 Ok(text) => text_result(&text),
                 Err(err) => error_text(&err),
+            }
+        }
+        "read_skill" => {
+            let Some(name) = json_string(line, "skill") else {
+                return r#"{"content":[{"type":"text","text":"skill is required"}],"isError":true}"#
+                    .into();
+            };
+            let skills = crate::skills::load(home, &cwd());
+            let Some(skill) = skills.iter().find(|skill| skill.name == name) else {
+                return error_text(&format!("no skill {name}"));
+            };
+            match std::fs::read_to_string(&skill.path) {
+                Ok(text) => {
+                    let mut clipped = text;
+                    if clipped.len() > 8_000 {
+                        clipped.truncate(8_000);
+                    }
+                    text_result(&clipped)
+                }
+                Err(err) => error_text(&err.to_string()),
             }
         }
         "list_skills" => {
@@ -321,6 +341,14 @@ mod tests {
             Path::new("/"),
         );
         assert!(listed.contains("read_handoff"));
+        std::fs::create_dir_all(home.join(".agents/skills/ship")).unwrap();
+        std::fs::write(home.join(".agents/skills/ship/SKILL.md"), "Keep the desk\n").unwrap();
+        let skill = handle(
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"read_skill","arguments":{"skill":"ship"}}}"#,
+            &home,
+        );
+        assert!(skill.contains("Keep the desk"));
+        assert!(skill.contains("\"id\":7"));
         let _ = std::fs::remove_dir_all(home);
     }
 }

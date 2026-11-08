@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{AcceptLevel, Permit};
+use crate::model::{AcceptLevel, AgentKind, Permit, Task};
 
 #[derive(Clone, Debug)]
 pub struct DeskState {
@@ -13,6 +13,8 @@ pub struct DeskState {
     pub externals: bool,
     pub mesh_health: Vec<(String, bool, bool)>,
     pub actions: Vec<String>,
+    pub tasks: Vec<Task>,
+    pub history: Vec<String>,
 }
 
 impl Default for DeskState {
@@ -26,6 +28,8 @@ impl Default for DeskState {
             externals: true,
             mesh_health: Vec::new(),
             actions: Vec::new(),
+            tasks: Vec::new(),
+            history: Vec::new(),
         }
     }
 }
@@ -77,10 +81,36 @@ pub fn load(home: &Path) -> DeskState {
                     state.actions.push(action);
                 }
             }
+            Some("Q") => {
+                let Some(agent) = parts.next().and_then(AgentKind::parse) else {
+                    continue;
+                };
+                let Some(model) = parts.next() else { continue };
+                let Some(effort) = parts.next() else { continue };
+                let Some(title) = parts.next() else { continue };
+                if title.is_empty() {
+                    continue;
+                }
+                state.tasks.push(Task {
+                    title: title.to_string(),
+                    owner: agent,
+                    model: model.to_string(),
+                    effort: effort.to_string(),
+                });
+            }
+            Some("Y") => {
+                if let Some(text) = line.split_once('\t').map(|(_, text)| text.to_string())
+                    && !text.is_empty()
+                {
+                    state.history.push(text);
+                }
+            }
             _ => {}
         }
     }
     state.actions.truncate(40);
+    state.tasks.truncate(40);
+    state.history.truncate(100);
     state
 }
 
@@ -114,6 +144,21 @@ pub fn save(home: &Path, state: &DeskState) -> std::io::Result<()> {
         let action = action.replace(['\n', '\r', '\t'], " ");
         body.push_str(&format!("A\t{action}\n"));
     }
+    for task in state.tasks.iter().take(40) {
+        let model = task.model.replace(['\n', '\r', '\t'], " ");
+        let effort = task.effort.replace(['\n', '\r', '\t'], " ");
+        let title = task.title.replace(['\n', '\r', '\t'], " ");
+        body.push_str(&format!(
+            "Q\t{}\t{model}\t{effort}\t{title}\n",
+            task.owner.label().to_ascii_lowercase()
+        ));
+    }
+    for line in state.history.iter().take(100) {
+        let line = line.replace(['\n', '\r', '\t'], " ");
+        if !line.is_empty() {
+            body.push_str(&format!("Y\t{line}\n"));
+        }
+    }
     fs::write(path, body)
 }
 
@@ -136,6 +181,13 @@ mod tests {
         state.permit = Permit::Plan;
         state.mesh_health.push(("/repo".into(), false, true));
         state.actions.push("task write the desk".into());
+        state.tasks.push(Task {
+            title: "write the desk".into(),
+            owner: AgentKind::Claude,
+            model: "claude".into(),
+            effort: "high".into(),
+        });
+        state.history.push("mesh".into());
         save(&home, &state).unwrap();
         let loaded = load(&home);
         assert_eq!(loaded.mesh_accept, vec![("/repo".into(), AcceptLevel::Safe)]);
@@ -144,6 +196,10 @@ mod tests {
         assert_eq!(loaded.permit, Permit::Plan);
         assert_eq!(loaded.mesh_health, vec![("/repo".into(), false, true)]);
         assert_eq!(loaded.actions, vec!["task write the desk".to_string()]);
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].owner, AgentKind::Claude);
+        assert_eq!(loaded.tasks[0].title, "write the desk");
+        assert_eq!(loaded.history, vec!["mesh".to_string()]);
         let _ = fs::remove_dir_all(home);
     }
 }

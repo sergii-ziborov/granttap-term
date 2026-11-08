@@ -1,10 +1,11 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub agent: &'static str,
     pub name: String,
+    pub path: PathBuf,
 }
 
 pub fn load(home: &Path, root: &Path) -> Vec<Skill> {
@@ -37,10 +38,12 @@ fn collect(dir: std::path::PathBuf, agent: &'static str, depth: usize, out: &mut
             continue;
         }
         if path.is_dir() {
-            if path.join("SKILL.md").is_file() {
+            let skill = path.join("SKILL.md");
+            if skill.is_file() {
                 out.push(Skill {
                     agent,
                     name: name.trim_start_matches('.').to_string(),
+                    path: skill,
                 });
             }
             collect(path, agent, depth + 1, out);
