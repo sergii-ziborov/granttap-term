@@ -11,8 +11,39 @@ pub fn load(home: &Path) -> Vec<Chat> {
     load_codex(&home.join(".codex/session_index.jsonl"), &mut chats);
     load_claude(&home.join(".claude/projects"), &mut chats);
     load_grok(&home.join(".grok/sessions"), &mut chats);
+    mark_live(home, &mut chats);
     chats.truncate(CAP);
     chats
+}
+
+fn mark_live(home: &Path, chats: &mut Vec<Chat>) {
+    for session in crate::agents::grok_sessions(home) {
+        if !session.alive {
+            continue;
+        }
+        if let Some(chat) = chats
+            .iter_mut()
+            .find(|chat| chat.agent == AgentKind::Grok && chat.id == session.id)
+        {
+            chat.live = true;
+            continue;
+        }
+        let path = crate::agents::session_path(home, &session.cwd, &session.id);
+        if !path.is_dir() {
+            continue;
+        }
+        let title = crate::agents::generated_title(&path).unwrap_or_else(|| session.id.clone());
+        chats.insert(
+            0,
+            Chat {
+                agent: AgentKind::Grok,
+                id: session.id,
+                title,
+                path,
+                live: true,
+            },
+        );
+    }
 }
 
 fn load_codex(index: &Path, out: &mut Vec<Chat>) {
@@ -33,6 +64,7 @@ fn load_codex(index: &Path, out: &mut Vec<Chat>) {
             id,
             title,
             path: index.to_path_buf(),
+            live: false,
         });
     }
 }
@@ -67,6 +99,7 @@ fn load_claude(root: &Path, out: &mut Vec<Chat>) {
                 title: id.clone(),
                 id,
                 path,
+                live: false,
             });
         }
     }
@@ -131,12 +164,79 @@ fn grok_session(path: &Path) -> Option<Chat> {
     if id.starts_with('.') {
         return None;
     }
+    let title = crate::agents::generated_title(path).unwrap_or_else(|| id.clone());
     Some(Chat {
         agent: AgentKind::Grok,
-        title: id.clone(),
+        title,
         id,
         path: path.to_path_buf(),
+        live: false,
     })
+}
+
+pub fn transcript(path: &Path) -> Vec<String> {
+    let file = if path.is_dir() {
+        let history = path.join("chat_history.jsonl");
+        if history.is_file() {
+            history
+        } else {
+            path.join("summary.json")
+        }
+    } else {
+        path.to_path_buf()
+    };
+    let Ok(text) = fs::read_to_string(file) else {
+        return vec!["No transcript.".into()];
+    };
+    if text.is_empty() {
+        return vec!["No transcript.".into()];
+    }
+    text.lines().take(40).map(|line| clip(line, 200)).collect()
+}
+
+pub fn write_handoff(home: &Path, chat: &Chat, to: AgentKind) -> Result<PathBuf, String> {
+    let dir = home.join(".granttap-term/handoff");
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let safe: String = chat
+        .id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        return Err("chat id is empty".into());
+    }
+    let path = dir.join(format!("{safe}.txt"));
+    let mut body = format!(
+        "from {}\nto {}\ntitle {}\npath {}\n---\n",
+        chat.agent.label(),
+        to.label(),
+        chat.title.replace(['\n', '\r'], " "),
+        chat.path.display()
+    );
+    for line in transcript(&chat.path) {
+        body.push_str(&line);
+        body.push('\n');
+    }
+    fs::write(&path, body).map_err(|err| err.to_string())?;
+    Ok(path)
+}
+
+fn clip(line: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in line.chars().enumerate() {
+        if index == max {
+            out.push('~');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub fn handoff(chats: &mut [Chat], id: &str, to: AgentKind) -> bool {
@@ -272,9 +372,43 @@ mod tests {
             id: "abc".into(),
             title: "abc".into(),
             path: PathBuf::new(),
+            live: false,
         }];
         assert!(handoff(&mut chats, "abc", AgentKind::Grok));
         assert_eq!(chats[0].agent, AgentKind::Grok);
         assert!(!handoff(&mut chats, "missing", AgentKind::Codex));
+    }
+
+    #[test]
+    fn live_title_and_handoff_come_from_the_session_files() {
+        let home = scratch();
+        fs::write(
+            home.join(".grok/sessions/work/one/summary.json"),
+            "{\"generated_title\":\"Desk towers\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".grok/sessions/work/one/chat_history.jsonl"),
+            "hello from the chat\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".grok/active_sessions.json"),
+            format!(
+                "[{{\"session_id\":\"one\",\"pid\":{},\"cwd\":\"/tmp\"}}]",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        let chats = load(&home);
+        let chat = chats.iter().find(|chat| chat.id == "one").unwrap();
+        assert_eq!(chat.title, "Desk towers");
+        assert!(chat.live);
+        let path = write_handoff(&home, chat, AgentKind::Claude).unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("from Grok"));
+        assert!(text.contains("to Claude"));
+        assert!(text.contains("hello from the chat"));
+        let _ = fs::remove_dir_all(home);
     }
 }

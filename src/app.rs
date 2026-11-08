@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::agents;
 use crate::chats::{self, files};
 use crate::draw;
 use crate::gitread;
@@ -59,6 +60,8 @@ pub struct App {
     link_note: String,
     links_key: String,
     dirty: Vec<String>,
+    questions_line: String,
+    mesh_health: Vec<(String, bool, bool)>,
 }
 
 enum Mode {
@@ -99,9 +102,15 @@ const COMMANDS: &[(&str, &str)] = &[
         "Set auto-accept for this mesh and the selected chat.",
     ),
     ("pause", "Pause or resume auto-accept."),
-    ("permit", "Set permission mode: ask, edits, bypass, plan."),
-    ("model", "Set the model name on the selected task."),
-    ("effort", "Set model effort within that agent's catalog."),
+    (
+        "permit",
+        "Set permission mode and write it into the agent config: ask, edits, bypass, plan.",
+    ),
+    ("model", "Set the model on the selected agent and its config."),
+    (
+        "effort",
+        "Set model effort within that agent's catalog and write it into the config.",
+    ),
     ("image", "Load an image path and show its cell preview."),
     ("open", "Open the selected chat in a split."),
     (
@@ -113,6 +122,10 @@ const COMMANDS: &[(&str, &str)] = &[
     ("history", "Read recent commits through Weavatrix git."),
     ("blob", "Read a file at HEAD through Weavatrix git: blob <path>."),
     ("health", "Toggle mesh code-health: health roads, or health extern."),
+    (
+        "commit",
+        "Commit with git commit. Stages nothing; only what is already staged is committed.",
+    ),
     ("fill", "Expand the open split to the whole terminal, or collapse it."),
 ];
 
@@ -160,6 +173,8 @@ impl App {
             link_note: String::new(),
             links_key: String::new(),
             dirty: Vec::new(),
+            questions_line: agents::questions(&home),
+            mesh_health: stored.mesh_health,
         };
         app.refresh_mesh();
         app
@@ -255,7 +270,10 @@ impl App {
             Section::Chats => self
                 .chats
                 .iter()
-                .map(|chat| format!("{:<7} {}", chat.agent.label(), chat.title))
+                .map(|chat| {
+                    let mark = if chat.live { "* " } else { "" };
+                    format!("{:<7} {mark}{}", chat.agent.label(), chat.title)
+                })
                 .collect(),
             Section::Tasks => self.task_lines(),
             Section::Mesh => self.mesh_view.clone(),
@@ -363,11 +381,7 @@ impl App {
     pub fn on_spot(&mut self, spot: crate::ui::Spot) -> Effect {
         match spot {
             crate::ui::Spot::Tab(section) => {
-                self.section = section;
-                self.cursor = 0;
-                self.scroll = 0;
-                self.fill = false;
-                self.mode = Mode::Desk;
+                self.enter(section);
                 Effect::None
             }
             crate::ui::Spot::Desc => {
@@ -391,8 +405,22 @@ impl App {
 
     pub fn reload(&mut self) {
         self.chats = chats::load(&self.home);
+        self.usage_line = usage::line(&self.home);
+        self.questions_line = agents::questions(&self.home);
         self.links_key.clear();
         self.refresh_mesh();
+    }
+
+    fn enter(&mut self, section: Section) {
+        self.section = section;
+        self.cursor = 0;
+        self.scroll = 0;
+        self.mode = Mode::Desk;
+        self.fill = false;
+        if section == Section::Tasks {
+            self.usage_line = usage::line(&self.home);
+            self.questions_line = agents::questions(&self.home);
+        }
     }
 
     fn shown_accept(&self) -> AcceptLevel {
@@ -417,7 +445,7 @@ impl App {
     fn task_lines(&self) -> Vec<String> {
         let mut lines = vec![
             format!("Usage  {}", self.usage_line),
-            "Questions  no data".into(),
+            format!("Questions  {}", self.questions_line),
             format!("permit {}  effort {}", self.permit.label(), self.effort),
             "A task has one owner.".into(),
         ];
@@ -494,6 +522,12 @@ impl App {
         } else {
             lines.push(format!("Env  {}", envs.join("  ")));
         }
+        let keys = health::env_example_keys(&root_path);
+        if keys.is_empty() {
+            lines.push("Env keys  none".into());
+        } else {
+            lines.push(format!("Env keys  {}", keys.join("  ")));
+        }
         self.skills = skills::load(&self.home, &root_path);
         if self.skills.is_empty() {
             lines.push("Skills  none".into());
@@ -506,10 +540,11 @@ impl App {
                 lines.push(format!("  {}  {}", skill.agent, skill.name));
             }
         }
+        let (roads, externals) = self.health_flags();
         lines.push(format!(
             "Health  roads {}  extern {}  accept {}",
-            on_off(self.roads),
-            on_off(self.externals),
+            on_off(roads),
+            on_off(externals),
             self.shown_accept().label()
         ));
         if self.actions.is_empty() {
@@ -521,7 +556,8 @@ impl App {
             }
         }
         if let Some(path) = &root {
-            lines.extend(health::picture(path, self.roads, self.externals));
+            let (roads, externals) = self.health_flags();
+            lines.extend(health::picture(path, roads, externals));
             self.dirty = gitread::dirty_paths(path).unwrap_or_default();
         } else {
             lines.push("No towers.".into());
@@ -581,11 +617,7 @@ impl App {
             .position(|section| *section == self.section)
             .unwrap_or(0) as i32;
         let next = (index + delta).rem_euclid(Section::ALL.len() as i32) as usize;
-        self.section = Section::ALL[next];
-        self.cursor = 0;
-        self.scroll = 0;
-        self.mode = Mode::Desk;
-        self.fill = false;
+        self.enter(Section::ALL[next]);
     }
 
     fn toggle_fill(&mut self) {
@@ -626,10 +658,7 @@ impl App {
         match head {
             "chats" | "tasks" | "mesh" | "files" | "browser" | "lessons" => {
                 if let Some(section) = Section::parse(head) {
-                    self.section = section;
-                    self.cursor = 0;
-                    self.mode = Mode::Desk;
-                    self.fill = false;
+                    self.enter(section);
                 }
             }
             "task" => self.add_task(&rest),
@@ -648,6 +677,7 @@ impl App {
             "permit" => match Permit::parse(&rest) {
                 Some(permit) => {
                     self.permit = permit;
+                    self.note = agents::apply_permit(&self.home, &self.dir, permit);
                     self.record(&format!("permit {}", permit.label()));
                     self.persist();
                 }
@@ -667,6 +697,7 @@ impl App {
             "history" => self.show_history(),
             "blob" => self.show_blob(&rest),
             "health" => self.health_cmd(&rest),
+            "commit" => self.commit_outside(&rest),
             "fill" => self.toggle_fill(),
             _ => self.note = format!("No command {head}."),
         }
@@ -699,16 +730,26 @@ impl App {
             self.note = "move grok, claude, or codex".into();
             return;
         };
-        let Some(id) = self.chats.get(self.cursor).map(|chat| chat.id.clone()) else {
+        let Some(chat) = self.chats.get(self.cursor).cloned() else {
             self.note = "No chat.".into();
             return;
         };
-        if chats::handoff(&mut self.chats, &id, agent) {
-            self.note = format!("Moved to {}", agent.label());
-            self.record(&format!("move {id} to {}", agent.label()));
-            self.persist();
-            self.refresh_mesh();
+        if !chats::handoff(&mut self.chats, &chat.id, agent) {
+            return;
         }
+        let saved = chats::write_handoff(&self.home, &chat, agent);
+        let mut body = vec![format!("Moved to {}", agent.label())];
+        match &saved {
+            Ok(path) => body.push(format!("handoff  {}", path.display())),
+            Err(err) => body.push(format!("handoff  {err}")),
+        }
+        body.push("Context".into());
+        body.extend(chats::transcript(&chat.path));
+        self.note = format!("Moved to {}", agent.label());
+        self.record(&format!("move {} to {}", chat.id, agent.label()));
+        self.persist();
+        self.refresh_mesh();
+        self.open_split(dress(agent, &chat.title, body), Some(agent));
     }
 
     fn set_accept(&mut self, level: AcceptLevel) {
@@ -742,46 +783,116 @@ impl App {
             return;
         }
         self.model = name.into();
-        if self.cursor >= 4
+        if self.section == Section::Tasks
+            && self.cursor >= 4
             && let Some(task) = self.tasks.get_mut(self.cursor - 4)
         {
             task.model = self.model.clone();
         }
+        self.note = agents::apply_model(&self.home, &self.dir, self.selected_agent(), name);
         self.record(&format!("model {name}"));
         self.persist();
     }
 
     fn set_effort(&mut self, name: &str) {
-        let agent = self
-            .chats
-            .get(self.cursor)
-            .map(|chat| chat.agent)
-            .unwrap_or(AgentKind::Grok);
-        if agent.efforts().contains(&name) {
-            self.effort = name.into();
-            if let Some(task) = self.tasks.last_mut() {
-                task.effort = self.effort.clone();
-            }
-            self.record(&format!("effort {name}"));
-            self.persist();
-        } else {
+        let agent = self.selected_agent().unwrap_or(AgentKind::Grok);
+        if !agent.efforts().contains(&name) {
             self.note = format!("{} effort: {}", agent.label(), agent.efforts().join(", "));
+            return;
         }
+        self.effort = name.into();
+        if let Some(task) = self.tasks.last_mut() {
+            task.effort = self.effort.clone();
+        }
+        self.note = agents::apply_effort(&self.home, agent, name);
+        self.record(&format!("effort {name}"));
+        self.persist();
+    }
+
+    fn selected_agent(&self) -> Option<AgentKind> {
+        if self.section == Section::Tasks && self.cursor >= 4 {
+            return self.tasks.get(self.cursor - 4).map(|task| task.owner);
+        }
+        self.chats.get(self.cursor).map(|chat| chat.agent)
     }
 
     fn health_cmd(&mut self, name: &str) {
+        let key = self.mesh_key();
+        let (mut roads, mut externals) = self.health_flags();
         match name {
-            "roads" => self.roads = !self.roads,
-            "extern" => self.externals = !self.externals,
+            "roads" => roads = !roads,
+            "extern" => externals = !externals,
             _ => {
                 self.note = "health roads, or health extern".into();
                 return;
             }
         }
+        if let Some(slot) = self.mesh_health.iter_mut().find(|(path, _, _)| path == &key) {
+            slot.1 = roads;
+            slot.2 = externals;
+        } else {
+            self.mesh_health.push((key, roads, externals));
+        }
         self.record(&format!("health {name}"));
         self.persist();
         self.refresh_mesh();
         self.section = Section::Mesh;
+    }
+
+    fn mesh_key(&self) -> String {
+        mesh::git_root(&self.dir)
+            .unwrap_or_else(|| self.dir.clone())
+            .display()
+            .to_string()
+    }
+
+    fn health_flags(&self) -> (bool, bool) {
+        let key = self.mesh_key();
+        self.mesh_health
+            .iter()
+            .find(|(path, _, _)| path == &key)
+            .map(|(_, roads, externals)| (*roads, *externals))
+            .unwrap_or((self.roads, self.externals))
+    }
+
+    fn commit_outside(&mut self, message: &str) {
+        if message.is_empty() {
+            self.note = "commit needs a message".into();
+            return;
+        }
+        let Some(root) = mesh::git_root(&self.dir) else {
+            self.note = "Repo  none".into();
+            return;
+        };
+        match Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(&root)
+            .output()
+        {
+            Ok(output) => {
+                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                let err = String::from_utf8_lossy(&output.stderr);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(err.trim());
+                }
+                if text.trim().is_empty() {
+                    text = format!("git commit exited {}", output.status);
+                }
+                self.open_split(text.lines().map(str::to_string).collect(), None);
+                if output.status.success() {
+                    self.record(&format!("commit {message}"));
+                    self.persist();
+                    self.links_key.clear();
+                    self.refresh_mesh();
+                } else {
+                    self.note = "commit refused".into();
+                }
+            }
+            Err(err) => self.note = format!("git: {err}"),
+        }
     }
 
     fn paste_image(&mut self, text: &str) {
@@ -886,7 +997,7 @@ impl App {
         };
         let body = if context {
             let mut lines = vec!["Context".into()];
-            lines.extend(read_context(&chat.path));
+            lines.extend(chats::transcript(&chat.path));
             lines
         } else {
             vec!["Opened.".into()]
@@ -1009,6 +1120,7 @@ impl App {
             permit: self.permit,
             roads: self.roads,
             externals: self.externals,
+            mesh_health: self.mesh_health.clone(),
             actions: self.actions.clone(),
         };
         let _ = store::save(&self.home, &state);
@@ -1058,29 +1170,6 @@ fn push_second(found: &mut Vec<String>, head: &str, partial: &str) {
     }
 }
 
-fn read_context(path: &Path) -> Vec<String> {
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    if text.is_empty() {
-        if path.is_dir() {
-            return vec!["No transcript file in this session.".into()];
-        }
-        return vec!["No transcript.".into()];
-    }
-    text.lines().take(40).map(|line| clip(line, 200)).collect()
-}
-
-fn clip(line: &str, max: usize) -> String {
-    let mut out = String::new();
-    for (index, ch) in line.chars().enumerate() {
-        if index == max {
-            out.push('~');
-            break;
-        }
-        out.push(ch);
-    }
-    out
-}
-
 pub fn edit(path: &Path, dir: &Path) {
     let _ = Command::new("vim").arg(path).current_dir(dir).status();
 }
@@ -1107,6 +1196,7 @@ mod tests {
             id: "abc".into(),
             title: "abc".into(),
             path: PathBuf::new(),
+            live: false,
         });
         app.cmd = "task write the desk".into();
         app.on_key(Key::Enter);
@@ -1159,6 +1249,91 @@ mod tests {
         assert!(app.fill);
         app.on_key(Key::F(3));
         assert!(!app.fill);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn permit_writes_the_temp_home_and_commit_does_not_stage() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-desk-home-{n}"));
+        let dir = std::env::temp_dir().join(format!("granttap-desk-repo-{n}"));
+        std::fs::create_dir_all(home.join(".grok")).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            home.join(".grok/config.toml"),
+            "[ui]\npermission_mode = \"ask\"\nyolo = false\n\n[models]\ndefault = \"grok-4\"\ndefault_reasoning_effort = \"medium\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".claude/settings.json"),
+            "{\"hooks\":{\"keep\":true},\"effortLevel\":\"medium\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "model = \"old\"\nmodel_reasoning_effort = \"medium\"\napproval_policy = \"on-request\"\n\n[projects.demo]\nmodel = \"leave\"\n",
+        )
+        .unwrap();
+        let mut app = App::new(dir.clone(), home.clone());
+        app.chats.push(crate::model::Chat {
+            agent: AgentKind::Grok,
+            id: "s".into(),
+            title: "s".into(),
+            path: PathBuf::new(),
+            live: true,
+        });
+        app.cursor = 0;
+        app.cmd = "permit bypass".into();
+        app.on_key(Key::Enter);
+        let grok = std::fs::read_to_string(home.join(".grok/config.toml")).unwrap();
+        assert!(grok.contains("permission_mode = \"always-approve\""));
+        assert!(grok.contains("yolo = false"));
+        let local = std::fs::read_to_string(dir.join(".claude/settings.local.json")).unwrap();
+        assert!(local.contains("bypassPermissions"));
+        let claude = std::fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        assert!(claude.contains("\"hooks\":{\"keep\":true}"));
+        let codex = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        assert!(codex.contains("approval_policy = \"never\""));
+        assert!(codex.contains("model = \"leave\""));
+        app.cmd = "model grok-4.7".into();
+        app.on_key(Key::Enter);
+        app.cmd = "effort high".into();
+        app.on_key(Key::Enter);
+        let grok = std::fs::read_to_string(home.join(".grok/config.toml")).unwrap();
+        assert!(grok.contains("default = \"grok-4.7\""));
+        assert!(grok.contains("default_reasoning_effort = \"high\""));
+        let codex = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        assert!(codex.contains("model = \"old\""));
+        assert!(codex.contains("model_reasoning_effort = \"medium\""));
+        let status = Command::new("git")
+            .args(["init"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(dir.join("note.txt"), "unstaged\n").unwrap();
+        app.cmd = "commit ship the desk".into();
+        app.on_key(Key::Enter);
+        assert_eq!(app.note, "commit refused");
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(!head.success());
+        let porcelain = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let porcelain = String::from_utf8_lossy(&porcelain.stdout);
+        assert!(porcelain.contains("note.txt"));
+        let _ = std::fs::remove_dir_all(home);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

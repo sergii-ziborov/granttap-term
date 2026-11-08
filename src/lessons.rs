@@ -8,7 +8,7 @@ pub fn lessons() -> &'static [Lesson] {
         },
         Lesson {
             title: "Claude",
-            body: "Chats from Claude, Codex, and Grok on this computer are one list. move sends the selected chat to another agent.",
+            body: "Chats from Claude, Codex, and Grok on this computer are one list. move writes a handoff and opens that chat in the other agent's split.",
         },
         Lesson {
             title: "The terminal",

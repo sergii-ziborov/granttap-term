@@ -11,6 +11,7 @@ pub struct DeskState {
     pub permit: Permit,
     pub roads: bool,
     pub externals: bool,
+    pub mesh_health: Vec<(String, bool, bool)>,
     pub actions: Vec<String>,
 }
 
@@ -23,6 +24,7 @@ impl Default for DeskState {
             permit: Permit::Ask,
             roads: true,
             externals: true,
+            mesh_health: Vec::new(),
             actions: Vec::new(),
         }
     }
@@ -57,6 +59,14 @@ pub fn load(home: &Path) -> DeskState {
             Some("P") => state.paused = parts.next() == Some("1"),
             Some("R") => state.roads = parts.next() != Some("0"),
             Some("E") => state.externals = parts.next() != Some("0"),
+            Some("H") => {
+                let Some(root) = parts.next() else { continue };
+                let Some(roads) = parts.next() else { continue };
+                let Some(externals) = parts.next() else { continue };
+                state
+                    .mesh_health
+                    .push((root.to_string(), roads != "0", externals != "0"));
+            }
             Some("T") => {
                 if let Some(permit) = parts.next().and_then(Permit::parse) {
                     state.permit = permit;
@@ -91,6 +101,14 @@ pub fn save(home: &Path, state: &DeskState) -> std::io::Result<()> {
     body.push_str(&format!("P\t{}\n", if state.paused { "1" } else { "0" }));
     body.push_str(&format!("R\t{}\n", if state.roads { "1" } else { "0" }));
     body.push_str(&format!("E\t{}\n", if state.externals { "1" } else { "0" }));
+    for (root, roads, externals) in &state.mesh_health {
+        let root = root.replace(['\t', '\n', '\r'], " ");
+        body.push_str(&format!(
+            "H\t{root}\t{}\t{}\n",
+            if *roads { "1" } else { "0" },
+            if *externals { "1" } else { "0" }
+        ));
+    }
     body.push_str(&format!("T\t{}\n", state.permit.label()));
     for action in state.actions.iter().take(40) {
         let action = action.replace(['\n', '\r', '\t'], " ");
@@ -116,6 +134,7 @@ mod tests {
         state.chat_accept.push(("abc".into(), AcceptLevel::Full));
         state.paused = true;
         state.permit = Permit::Plan;
+        state.mesh_health.push(("/repo".into(), false, true));
         state.actions.push("task write the desk".into());
         save(&home, &state).unwrap();
         let loaded = load(&home);
@@ -123,6 +142,7 @@ mod tests {
         assert_eq!(loaded.chat_accept, vec![("abc".into(), AcceptLevel::Full)]);
         assert!(loaded.paused);
         assert_eq!(loaded.permit, Permit::Plan);
+        assert_eq!(loaded.mesh_health, vec![("/repo".into(), false, true)]);
         assert_eq!(loaded.actions, vec!["task write the desk".to_string()]);
         let _ = fs::remove_dir_all(home);
     }

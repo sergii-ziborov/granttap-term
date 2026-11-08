@@ -1,3 +1,4 @@
+mod agents;
 mod app;
 mod chats;
 mod draw;

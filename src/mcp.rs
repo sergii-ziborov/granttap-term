@@ -53,10 +53,11 @@ fn call(line: &str, home: &Path) -> String {
                     body.push(',');
                 }
                 body.push_str(&format!(
-                    "{{\"agent\":\"{}\",\"id\":\"{}\",\"title\":\"{}\"}}",
+                    "{{\"agent\":\"{}\",\"id\":\"{}\",\"title\":\"{}\",\"live\":{}}}",
                     chat.agent.label(),
                     escape(&chat.id),
-                    escape(&chat.title)
+                    escape(&chat.title),
+                    if chat.live { "true" } else { "false" }
                 ));
             }
             body.push(']');

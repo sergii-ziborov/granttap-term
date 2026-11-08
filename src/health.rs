@@ -89,6 +89,32 @@ pub fn env_names(root: &Path) -> Vec<String> {
         .collect()
 }
 
+pub fn env_example_keys(root: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(root.join(".env.example")) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || !key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+            continue;
+        }
+        keys.push(key.to_string());
+        if keys.len() == 12 {
+            break;
+        }
+    }
+    keys
+}
+
 fn walk(root: &Path, dir: &Path, depth: usize, dirs: &mut usize, out: &mut Vec<FileTower>) {
     if depth > 6 || out.len() >= 240 || *dirs > 80 {
         return;
@@ -289,6 +315,28 @@ mod tests {
         assert!(joined.contains("src/main.rs — src/app.rs"));
         assert!(joined.contains("libc"));
         assert!(joined.contains("38;5;196"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn env_example_lists_names_only() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("granttap-env-{n}"));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".env"), "SECRET=hidden\n").unwrap();
+        fs::write(
+            root.join(".env.example"),
+            "# note\nAPI_URL=\nexport TOKEN=nope\n",
+        )
+        .unwrap();
+        assert!(env_names(&root).iter().any(|name| name == ".env"));
+        assert_eq!(
+            env_example_keys(&root),
+            vec!["API_URL".to_string(), "TOKEN".to_string()]
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

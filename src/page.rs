@@ -67,10 +67,15 @@ pub fn render(html: &str) -> Vec<String> {
         let from = start + open + 1;
         title = decode(html[from..from + end].trim());
     }
-    let mut out = String::new();
-    let mut skip = 0u8;
-    let mut chars = html.chars().peekable();
+    let mut build = Build::default();
+    if !title.is_empty() {
+        build.lines.push(format!("title  {title}"));
+    }
+    let mut chars = html.chars();
     while let Some(ch) = chars.next() {
+        if build.lines.len() >= 180 {
+            break;
+        }
         if ch == '<' {
             let mut tag = String::from("<");
             for next in chars.by_ref() {
@@ -79,60 +84,192 @@ pub fn render(html: &str) -> Vec<String> {
                     break;
                 }
             }
-            let low = tag.to_ascii_lowercase();
-            if low.starts_with("<script") {
-                skip = 1;
-            } else if low.starts_with("<style") {
-                skip = 2;
-            } else if low.starts_with("</script") || low.starts_with("</style") {
-                skip = 0;
-            } else if skip == 0 && low.starts_with("<img") {
-                out.push_str(&image_mark(&tag));
-                out.push('\n');
-            } else if skip == 0 && breaks(&low) {
-                out.push('\n');
-            }
+            build.on_tag(&tag);
             continue;
         }
-        if skip == 0 {
-            out.push(ch);
-        }
+        build.push_char(ch);
     }
-    let mut lines = Vec::new();
-    if !title.is_empty() {
-        lines.push(format!("title  {title}"));
-    }
-    let mut blank = false;
-    for line in decode(&out).lines() {
-        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        if line.is_empty() {
-            if !blank && !lines.is_empty() {
-                lines.push(String::new());
-            }
-            blank = true;
-            continue;
-        }
-        blank = false;
-        lines.push(clip(&line, 200));
-        if lines.len() == 180 {
-            break;
-        }
-    }
-    lines
+    build.flush();
+    build.lines.truncate(180);
+    build.lines
 }
 
-fn breaks(tag: &str) -> bool {
-    tag.starts_with("<br")
-        || tag.starts_with("<p")
-        || tag.starts_with("</p")
-        || tag.starts_with("<div")
-        || tag.starts_with("</div")
-        || tag.starts_with("<h1")
-        || tag.starts_with("<h2")
-        || tag.starts_with("<h3")
-        || tag.starts_with("<li")
-        || tag.starts_with("<tr")
-        || tag.starts_with("</h")
+#[derive(Default)]
+struct Build {
+    lines: Vec<String>,
+    buf: String,
+    skip: u8,
+    pre: bool,
+    in_ol: bool,
+    ol_n: usize,
+    hrefs: Vec<String>,
+}
+
+impl Build {
+    fn on_tag(&mut self, raw: &str) {
+        let low = raw.to_ascii_lowercase();
+        if tag_is(&low, "<script") {
+            self.skip = 1;
+            return;
+        }
+        if tag_is(&low, "<style") {
+            self.skip = 2;
+            return;
+        }
+        if tag_is(&low, "</script") || tag_is(&low, "</style") {
+            self.skip = 0;
+            return;
+        }
+        if self.skip != 0 || low.starts_with("<!--") {
+            return;
+        }
+        if tag_is(&low, "<img") {
+            self.flush();
+            self.lines.push(clip(&decode(&image_mark(raw)), 200));
+            return;
+        }
+        if tag_is(&low, "<pre") {
+            self.flush();
+            self.pre = true;
+            return;
+        }
+        if tag_is(&low, "</pre") {
+            self.flush();
+            self.pre = false;
+            return;
+        }
+        if tag_is(&low, "<ol") {
+            self.flush();
+            self.in_ol = true;
+            self.ol_n = 0;
+            return;
+        }
+        if tag_is(&low, "</ol") {
+            self.flush();
+            self.in_ol = false;
+            return;
+        }
+        if tag_is(&low, "<ul") || tag_is(&low, "</ul") {
+            self.flush();
+            return;
+        }
+        if tag_is(&low, "<li") {
+            self.flush();
+            if self.in_ol {
+                self.ol_n += 1;
+                self.buf = format!("{}. ", self.ol_n);
+            } else {
+                self.buf = "- ".into();
+            }
+            return;
+        }
+        if low.starts_with("<h")
+            && low.as_bytes().get(2).is_some_and(u8::is_ascii_digit)
+            && tag_is(&low, &format!("<h{}", low.as_bytes()[2] as char))
+        {
+            self.flush();
+            let level = (low.as_bytes()[2] - b'0').clamp(1, 6);
+            self.buf = "#".repeat(level as usize);
+            self.buf.push(' ');
+            return;
+        }
+        if tag_is(&low, "<a") {
+            self.hrefs.push(attr(raw, "href").unwrap_or_default());
+            return;
+        }
+        if tag_is(&low, "</a") {
+            if let Some(href) = self.hrefs.pop()
+                && !href.is_empty()
+            {
+                if !self.buf.ends_with(' ') {
+                    self.buf.push(' ');
+                }
+                self.buf.push('<');
+                self.buf.push_str(&href);
+                self.buf.push('>');
+            }
+            return;
+        }
+        if tag_is(&low, "<td") || tag_is(&low, "<th") {
+            if !self.buf.trim().is_empty() {
+                if !self.buf.ends_with(' ') {
+                    self.buf.push(' ');
+                }
+                self.buf.push_str("| ");
+            }
+            return;
+        }
+        if tag_is(&low, "<tr")
+            || tag_is(&low, "</tr")
+            || tag_is(&low, "</h1")
+            || tag_is(&low, "</h2")
+            || tag_is(&low, "</h3")
+            || tag_is(&low, "</h4")
+            || tag_is(&low, "</h5")
+            || tag_is(&low, "</h6")
+            || tag_is(&low, "<p")
+            || tag_is(&low, "</p")
+            || tag_is(&low, "<div")
+            || tag_is(&low, "</div")
+            || tag_is(&low, "<br")
+            || tag_is(&low, "</li")
+            || tag_is(&low, "<table")
+            || tag_is(&low, "</table")
+            || tag_is(&low, "<hr")
+        {
+            self.flush();
+            if tag_is(&low, "<hr") {
+                self.lines.push("---".into());
+            }
+        }
+    }
+
+    fn push_char(&mut self, ch: char) {
+        if self.skip != 0 {
+            return;
+        }
+        if self.pre {
+            if ch == '\n' {
+                self.flush();
+            } else {
+                self.buf.push(ch);
+            }
+            return;
+        }
+        if ch.is_whitespace() {
+            if !self.buf.is_empty() && !self.buf.ends_with(' ') {
+                self.buf.push(' ');
+            }
+            return;
+        }
+        self.buf.push(ch);
+    }
+
+    fn flush(&mut self) {
+        if self.lines.len() >= 180 {
+            self.buf.clear();
+            return;
+        }
+        let raw = std::mem::take(&mut self.buf);
+        let line = if self.pre {
+            decode(&raw)
+        } else {
+            decode(&raw.split_whitespace().collect::<Vec<_>>().join(" "))
+        };
+        if line.is_empty() {
+            return;
+        }
+        self.lines.push(clip(&line, 200));
+    }
+}
+
+fn tag_is(low: &str, name: &str) -> bool {
+    let Some(rest) = low.strip_prefix(name) else {
+        return false;
+    };
+    rest.is_empty()
+        || rest.starts_with([' ', '>', '/'])
+        || rest.starts_with('\t')
 }
 
 fn image_mark(tag: &str) -> String {
@@ -204,5 +341,23 @@ mod tests {
         assert!(joined.contains("Hello"));
         assert!(joined.contains("[img map] a.png"));
         assert!(!joined.contains("secret"));
+    }
+
+    #[test]
+    fn page_shows_lists_links_pre_and_tables() {
+        let lines = render(
+            "<style>hidden</style><h2>List</h2><ul><li>One</li><li>Two</li></ul><ol><li>First</li></ol><p><a href=\"https://example.com/a\">Go</a></p><pre>fn main() {\n}</pre><table><tr><th>Lang</th><th>Ink</th></tr><tr><td>rs</td><td>red</td></tr></table>",
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("## List"));
+        assert!(joined.contains("- One"));
+        assert!(joined.contains("- Two"));
+        assert!(joined.contains("1. First"));
+        assert!(joined.contains("Go <https://example.com/a>"));
+        assert!(joined.contains("fn main() {"));
+        assert!(joined.contains('}'));
+        assert!(joined.contains("Lang | Ink"));
+        assert!(joined.contains("rs | red"));
+        assert!(!joined.contains("hidden"));
     }
 }

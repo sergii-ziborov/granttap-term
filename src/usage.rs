@@ -2,21 +2,27 @@ use std::fs;
 use std::path::Path;
 
 pub fn line(home: &Path) -> String {
-    let path = home.join(".claude/stats-cache.json");
-    let Ok(text) = fs::read_to_string(path) else {
-        return "no data".into();
-    };
-    let Some(sessions) = number_after(&text, "totalSessions") else {
-        return "no data".into();
-    };
-    let Some(messages) = number_after(&text, "totalMessages") else {
-        return "no data".into();
-    };
+    let claude = claude_part(home);
+    let grok = crate::agents::grok_usage(home);
+    match (claude, grok) {
+        (Some(claude), Some(grok)) => format!("{claude}  {grok}"),
+        (Some(claude), None) => claude,
+        (None, Some(grok)) => grok,
+        (None, None) => "no data".into(),
+    }
+}
+
+fn claude_part(home: &Path) -> Option<String> {
+    let text = fs::read_to_string(home.join(".claude/stats-cache.json")).ok()?;
+    let sessions = number_after(&text, "totalSessions")?;
+    let messages = number_after(&text, "totalMessages")?;
     let model = object_key_after(&text, "modelUsage").unwrap_or_else(|| "model".into());
     let window = text.split("\"modelUsage\"").nth(1).unwrap_or("");
     let input = number_after(window, "inputTokens").unwrap_or(0);
     let output = number_after(window, "outputTokens").unwrap_or(0);
-    format!("Claude {sessions} sessions  {messages} messages  {model} in {input} out {output}")
+    Some(format!(
+        "Claude {sessions} sessions  {messages} messages  {model} in {input} out {output}"
+    ))
 }
 
 fn number_after(text: &str, key: &str) -> Option<u64> {
