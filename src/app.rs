@@ -1036,15 +1036,16 @@ impl App {
             return self.edit_path(row.path.clone());
         }
         let text = std::fs::read_to_string(&row.path).unwrap_or_default();
-        let mut lines = self.file_header(&row.path);
-        lines.extend(text.lines().take(200).map(str::to_string));
+        let (changed, body) = self.marked_lines(&row.path, &text);
+        let mut lines = self.file_header(&row.path, changed);
+        lines.extend(body);
         self.mode = Mode::View { lines };
         self.fill = false;
         self.scroll = 0;
         Effect::None
     }
 
-    fn file_header(&self, path: &Path) -> Vec<String> {
+    fn file_header(&self, path: &Path, changed: usize) -> Vec<String> {
         let Some(root) = mesh::git_root(&self.dir) else {
             return vec![format!("where  {}", path.display())];
         };
@@ -1058,10 +1059,39 @@ impl App {
             Ok(None) => lines.push("when  no commit for this path".into()),
             Err(err) => lines.push(format!("when  {err}")),
         }
-        if self.dirty.iter().any(|item| item == &rel) {
+        if changed > 0 {
+            lines.push(format!("changed  {changed} lines"));
+        } else if self.dirty.iter().any(|item| item == &rel) {
             lines.push("changed  working tree".into());
         }
         lines
+    }
+
+    fn marked_lines(&self, path: &Path, text: &str) -> (usize, Vec<String>) {
+        let previous = self.head_lines(path);
+        let mut changed = 0usize;
+        let mut lines = Vec::new();
+        for (index, line) in text.lines().take(200).enumerate() {
+            let touched = previous
+                .as_ref()
+                .is_some_and(|old| old.get(index).is_none_or(|item| item != line));
+            if touched {
+                changed += 1;
+                lines.push(format!("* {line}"));
+            } else {
+                lines.push(line.to_string());
+            }
+        }
+        (changed, lines)
+    }
+
+    fn head_lines(&self, path: &Path) -> Option<Vec<String>> {
+        let root = mesh::git_root(&self.dir)?;
+        let rel = health::rel(&root, path)?;
+        match gitread::blob_text(&root, "HEAD", &rel, 64 * 1024) {
+            Ok(text) => Some(text.lines().map(str::to_string).collect()),
+            Err(_) => Some(Vec::new()),
+        }
     }
 
     fn edit_selected(&mut self) -> Effect {
@@ -1334,6 +1364,48 @@ mod tests {
         let porcelain = String::from_utf8_lossy(&porcelain.stdout);
         assert!(porcelain.contains("note.txt"));
         let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn editor_marks_lines_that_differ_from_head() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("granttap-edit-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "dev")
+                .env("GIT_AUTHOR_EMAIL", "dev@example.com")
+                .env("GIT_COMMITTER_NAME", "dev")
+                .env("GIT_COMMITTER_EMAIL", "dev@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init"]);
+        std::fs::write(dir.join("a.rs"), "fn old() {}\nlet x = 1;\n").unwrap();
+        git(&["add", "a.rs"]);
+        git(&["commit", "-m", "start the file"]);
+        std::fs::write(dir.join("a.rs"), "fn new() {}\nlet x = 1;\n").unwrap();
+        let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
+        app.section = Section::Files;
+        app.cursor = 1;
+        app.on_key(Key::Enter);
+        let Mode::View { lines } = &app.mode else {
+            panic!("file did not open");
+        };
+        let joined = lines.join("\n");
+        assert!(joined.contains("where  a.rs"));
+        assert!(joined.contains("what  start the file"));
+        assert!(joined.contains("changed  1 lines"));
+        assert!(joined.contains("* fn new() {}"));
+        assert!(joined.contains("let x = 1;"));
+        assert!(!joined.contains("* let x"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
