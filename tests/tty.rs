@@ -47,6 +47,7 @@ fn mcp_initialize_replies_on_stdout() {
         .expect("read stdout");
     let status = child.wait().expect("wait");
     assert!(status.success(), "{status}");
-    assert!(out.contains("granttap-term"), "{out}");
+    assert!(out.contains("granttap-local"), "{out}");
+    assert!(out.contains("1.0.0"), "{out}");
     assert!(out.contains("\"id\":7"), "{out}");
 }

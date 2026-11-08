@@ -32,7 +32,7 @@ pub fn handle(line: &str, home: &Path) -> String {
     match method.as_str() {
         "initialize" => ok(
             id,
-            r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"granttap-term","version":"0.1.0"}}"#,
+            r#"{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"granttap-local","version":"1.0.0"}}"#,
         ),
         "tools/list" => ok(id, TOOLS),
         "tools/call" => ok(id, &call(line, home)),
@@ -282,7 +282,8 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
             Path::new("/"),
         );
-        assert!(response.contains("granttap-term"));
+        assert!(response.contains("granttap-local"));
+        assert!(response.contains("1.0.0"));
         assert!(response.contains("\"id\":1"));
     }
 

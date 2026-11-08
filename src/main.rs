@@ -13,6 +13,7 @@ mod mesh;
 mod model;
 mod page;
 mod sixel;
+mod shot;
 mod skills;
 mod store;
 mod term;
@@ -27,14 +28,31 @@ use app::{App, Effect};
 use term::{Key, Polled, Term};
 
 fn main() -> ExitCode {
-    if env::args().skip(1).any(|arg| arg == "mcp") {
-        return match mcp::serve() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(err) => {
-                eprintln!("granttap-term: {err}");
-                ExitCode::from(1)
-            }
-        };
+    let mut args = env::args().skip(1);
+    match args.next().as_deref() {
+        Some("mcp") => {
+            return match mcp::serve() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("granttap-term: {err}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+        Some("frame") => {
+            let Some(dir) = args.next() else {
+                eprintln!("granttap-term: frame needs a directory");
+                return ExitCode::from(1);
+            };
+            return match shot::write_all(std::path::Path::new(&dir)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("granttap-term: {err}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+        _ => {}
     }
     if !Term::tty() {
         eprintln!("granttap-term: run this inside a terminal");
