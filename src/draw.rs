@@ -6,6 +6,8 @@ pub struct Preview {
     pub mark: ImageMark,
     pub picture: String,
     pub sixel: String,
+    pub kitty: String,
+    pub iterm: String,
 }
 
 pub fn inspect(path: &Path, n: usize, cols: usize, rows: usize) -> Result<Preview, String> {
@@ -15,7 +17,7 @@ pub fn inspect(path: &Path, n: usize, cols: usize, rows: usize) -> Result<Previe
         .and_then(|ext| ext.to_str())
         .unwrap_or("image")
         .to_ascii_lowercase();
-    let (width, height, picture, sixel) = match image::open(path) {
+    let (width, height, picture, sixel, kitty, iterm) = match image::open(path) {
         Ok(image) => {
             let width = image.width();
             let height = image.height();
@@ -26,9 +28,12 @@ pub fn inspect(path: &Path, n: usize, cols: usize, rows: usize) -> Result<Previe
                 .to_rgb8();
             let picture_w = scaled.width() as usize;
             let picture_h = scaled.height() as usize;
-            let picture = half_blocks(picture_w, picture_h, scaled.as_raw());
-            let sixel = crate::sixel::encode(picture_w, picture_h, scaled.as_raw());
-            (width, height, picture, sixel)
+            let raw = scaled.as_raw();
+            let picture = half_blocks(picture_w, picture_h, raw);
+            let sixel = crate::sixel::encode(picture_w, picture_h, raw);
+            let kitty = crate::inline::kitty(picture_w, picture_h, raw);
+            let iterm = crate::inline::iterm(picture_w, picture_h, raw);
+            (width, height, picture, sixel, kitty, iterm)
         }
         Err(err) => return Err(err.to_string()),
     };
@@ -43,6 +48,8 @@ pub fn inspect(path: &Path, n: usize, cols: usize, rows: usize) -> Result<Previe
         },
         picture,
         sixel,
+        kitty,
+        iterm,
     })
 }
 

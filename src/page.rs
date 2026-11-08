@@ -128,6 +128,24 @@ impl Build {
             self.lines.push(clip(&decode(&image_mark(raw)), 200));
             return;
         }
+        if tag_is(&low, "<meta") {
+            let name = attr(raw, "name").unwrap_or_default();
+            if name.eq_ignore_ascii_case("description")
+                && let Some(content) = attr(raw, "content")
+            {
+                self.flush();
+                self.lines.push(clip(&format!("meta  {}", decode(&content)), 200));
+            }
+            return;
+        }
+        if tag_is(&low, "<input") || tag_is(&low, "<textarea") {
+            self.flush();
+            let name = attr(raw, "name")
+                .or_else(|| attr(raw, "placeholder"))
+                .unwrap_or_else(|| "field".into());
+            self.lines.push(clip(&format!("[field] {}", decode(&name)), 200));
+            return;
+        }
         if tag_is(&low, "<pre") {
             self.flush();
             self.pre = true;
@@ -151,6 +169,39 @@ impl Build {
         }
         if tag_is(&low, "<ul") || tag_is(&low, "</ul") {
             self.flush();
+            return;
+        }
+        if tag_is(&low, "<blockquote") {
+            self.flush();
+            self.buf = "> ".into();
+            return;
+        }
+        if tag_is(&low, "<button") {
+            self.flush();
+            self.buf = "[button] ".into();
+            return;
+        }
+        if tag_is(&low, "<summary") {
+            self.flush();
+            self.buf = "summary  ".into();
+            return;
+        }
+        if tag_is(&low, "<figcaption") {
+            self.flush();
+            self.buf = "caption  ".into();
+            return;
+        }
+        if tag_is(&low, "<option") {
+            self.flush();
+            self.buf = "option ".into();
+            return;
+        }
+        if tag_is(&low, "<code") && !self.pre {
+            self.buf.push('`');
+            return;
+        }
+        if tag_is(&low, "</code") && !self.pre {
+            self.buf.push('`');
             return;
         }
         if tag_is(&low, "<li") {
@@ -216,10 +267,41 @@ impl Build {
             || tag_is(&low, "<table")
             || tag_is(&low, "</table")
             || tag_is(&low, "<hr")
+            || tag_is(&low, "<blockquote")
+            || tag_is(&low, "</blockquote")
+            || tag_is(&low, "</button")
+            || tag_is(&low, "</summary")
+            || tag_is(&low, "</figcaption")
+            || tag_is(&low, "<figure")
+            || tag_is(&low, "</figure")
+            || tag_is(&low, "<nav")
+            || tag_is(&low, "</nav")
+            || tag_is(&low, "<dt")
+            || tag_is(&low, "<dd")
+            || tag_is(&low, "</option")
+            || tag_is(&low, "<label")
+            || tag_is(&low, "</label")
+            || tag_is(&low, "<select")
+            || tag_is(&low, "</select")
+            || tag_is(&low, "<header")
+            || tag_is(&low, "</header")
+            || tag_is(&low, "<footer")
+            || tag_is(&low, "</footer")
+            || tag_is(&low, "<section")
+            || tag_is(&low, "</section")
+            || tag_is(&low, "<article")
+            || tag_is(&low, "</article")
+            || tag_is(&low, "<main")
+            || tag_is(&low, "</main")
+            || tag_is(&low, "<aside")
+            || tag_is(&low, "</aside")
         {
             self.flush();
             if tag_is(&low, "<hr") {
                 self.lines.push("---".into());
+            }
+            if tag_is(&low, "<dd") {
+                self.buf = "dd ".into();
             }
         }
     }
@@ -359,5 +441,23 @@ mod tests {
         assert!(joined.contains("Lang | Ink"));
         assert!(joined.contains("rs | red"));
         assert!(!joined.contains("hidden"));
+    }
+
+    #[test]
+    fn page_shows_fields_quotes_buttons_and_meta() {
+        let lines = render(
+            "<meta name=\"description\" content=\"Desk towers\"><blockquote>Keep</blockquote><p>Use <code>move</code></p><button>Send</button><form><input name=\"title\"></form><details><summary>More</summary><p>Body</p></details><select><option>Red</option><option>Blue</option></select><label>Name</label>",
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("meta  Desk towers"));
+        assert!(joined.contains("> Keep"));
+        assert!(joined.contains("`move`"));
+        assert!(joined.contains("[button] Send"));
+        assert!(joined.contains("[field] title"));
+        assert!(joined.contains("summary More"));
+        assert!(joined.contains("Body"));
+        assert!(joined.contains("option Red"));
+        assert!(joined.contains("option Blue"));
+        assert!(joined.contains("Name"));
     }
 }

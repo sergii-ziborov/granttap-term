@@ -9,6 +9,7 @@ use crate::gitread;
 use crate::health;
 use crate::history::History;
 use crate::hl;
+use crate::inline;
 use crate::lessons;
 use crate::mesh;
 use crate::model::{AcceptLevel, AgentKind, FileRow, Permit, Section, Task};
@@ -62,6 +63,8 @@ pub struct App {
     dirty: Vec<String>,
     questions_line: String,
     mesh_health: Vec<(String, bool, bool)>,
+    confirm: String,
+    image_overlay: String,
 }
 
 enum Mode {
@@ -99,7 +102,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("move", "Send the selected chat to grok, claude, or codex."),
     (
         "accept",
-        "Set auto-accept for this mesh and the selected chat.",
+        "Set auto-accept for this mesh and the selected chat. ask and safe repeat a write. except-push runs writes and still asks before push. except-destructive and full run push. Pause asks first.",
     ),
     ("pause", "Pause or resume auto-accept."),
     (
@@ -125,6 +128,10 @@ const COMMANDS: &[(&str, &str)] = &[
     (
         "commit",
         "Commit with git commit. Stages nothing; only what is already staged is committed.",
+    ),
+    (
+        "push",
+        "Push with git push. except-destructive and full run it. Every other level asks once, then the same command repeats.",
     ),
     ("fill", "Expand the open split to the whole terminal, or collapse it."),
 ];
@@ -175,6 +182,8 @@ impl App {
             dirty: Vec::new(),
             questions_line: agents::questions(&home),
             mesh_health: stored.mesh_health,
+            confirm: String::new(),
+            image_overlay: String::new(),
         };
         app.refresh_mesh();
         app
@@ -198,6 +207,14 @@ impl App {
             Mode::Desk => "desk",
         };
         format!("{who}   filled   F3 collapse   Esc back")
+    }
+
+    pub fn image_overlay(&self) -> &str {
+        if self.section == Section::Browser {
+            &self.image_overlay
+        } else {
+            ""
+        }
     }
 
     pub fn mode_is_desk(&self) -> bool {
@@ -364,12 +381,14 @@ impl App {
             Key::F(4) => self.edit_selected(),
             Key::Enter => self.activate(),
             Key::Backspace => {
+                self.confirm.clear();
                 self.cmd.pop();
                 self.suggest = 0;
                 Effect::None
             }
             Key::Char(_) if self.fill => Effect::None,
             Key::Char(ch) => {
+                self.confirm.clear();
                 self.cmd.push(ch);
                 self.suggest = 0;
                 Effect::None
@@ -430,16 +449,54 @@ impl App {
         {
             return *level;
         }
-        self.mesh_level().unwrap_or(AcceptLevel::Ask)
-    }
-
-    fn mesh_level(&self) -> Option<AcceptLevel> {
-        let root = mesh::git_root(&self.dir)?;
-        let key = root.display().to_string();
+        let key = self.mesh_key();
         self.mesh_accept
             .iter()
             .find(|(path, _)| path == &key)
             .map(|(_, level)| *level)
+            .unwrap_or(AcceptLevel::Ask)
+    }
+
+    fn allows(&self) -> bool {
+        if self.paused {
+            return false;
+        }
+        matches!(
+            self.shown_accept(),
+            AcceptLevel::ExceptPush | AcceptLevel::ExceptDestructive | AcceptLevel::Full
+        )
+    }
+
+    fn blocked(&mut self, key: &str) -> bool {
+        self.hold(key, self.allows())
+    }
+
+    fn allows_push(&self) -> bool {
+        if self.paused {
+            return false;
+        }
+        matches!(
+            self.shown_accept(),
+            AcceptLevel::ExceptDestructive | AcceptLevel::Full
+        )
+    }
+
+    fn hold(&mut self, key: &str, allow: bool) -> bool {
+        if allow {
+            self.confirm.clear();
+            return false;
+        }
+        if self.confirm == key {
+            self.confirm.clear();
+            return false;
+        }
+        self.confirm = key.to_string();
+        self.note = if self.paused {
+            "paused  repeat to run".into()
+        } else {
+            "ask  repeat to run".into()
+        };
+        true
     }
 
     fn task_lines(&self) -> Vec<String> {
@@ -630,9 +687,11 @@ impl App {
     fn activate(&mut self) -> Effect {
         if !self.cmd.is_empty() {
             let line = self.cmd.clone();
-            self.history.push(&line);
-            self.run(&line);
-            self.cmd.clear();
+            if self.run(&line) {
+                self.history.push(&line);
+                self.cmd.clear();
+                self.confirm.clear();
+            }
             return Effect::None;
         }
         match self.section {
@@ -649,10 +708,10 @@ impl App {
         }
     }
 
-    fn run(&mut self, line: &str) {
+    fn run(&mut self, line: &str) -> bool {
         let mut parts = line.split_whitespace();
         let Some(head) = parts.next() else {
-            return;
+            return true;
         };
         let rest = parts.collect::<Vec<_>>().join(" ");
         match head {
@@ -674,17 +733,33 @@ impl App {
                 self.record(if self.paused { "pause" } else { "resume" });
                 self.persist();
             }
-            "permit" => match Permit::parse(&rest) {
-                Some(permit) => {
+            "permit" => {
+                if Permit::parse(&rest).is_none() {
+                    self.note = "permit: ask, edits, bypass, plan".into();
+                    return true;
+                }
+                if self.blocked(line) {
+                    return false;
+                }
+                if let Some(permit) = Permit::parse(&rest) {
                     self.permit = permit;
                     self.note = agents::apply_permit(&self.home, &self.dir, permit);
                     self.record(&format!("permit {}", permit.label()));
                     self.persist();
                 }
-                None => self.note = "permit: ask, edits, bypass, plan".into(),
-            },
-            "model" => self.set_model(&rest),
-            "effort" => self.set_effort(&rest),
+            }
+            "model" => {
+                if self.blocked(line) {
+                    return false;
+                }
+                self.set_model(&rest);
+            }
+            "effort" => {
+                if self.blocked(line) {
+                    return false;
+                }
+                self.set_effort(&rest);
+            }
             "image" => self.paste_image(&rest),
             "open" => {
                 let _ = self.open_chat(false);
@@ -697,10 +772,22 @@ impl App {
             "history" => self.show_history(),
             "blob" => self.show_blob(&rest),
             "health" => self.health_cmd(&rest),
-            "commit" => self.commit_outside(&rest),
+            "commit" => {
+                if self.blocked(line) {
+                    return false;
+                }
+                self.commit_outside(&rest);
+            }
+            "push" => {
+                if self.hold(line, self.allows_push()) {
+                    return false;
+                }
+                self.push_outside();
+            }
             "fill" => self.toggle_fill(),
             _ => self.note = format!("No command {head}."),
         }
+        true
     }
 
     fn add_task(&mut self, title: &str) {
@@ -895,6 +982,38 @@ impl App {
         }
     }
 
+    fn push_outside(&mut self) {
+        let Some(root) = mesh::git_root(&self.dir) else {
+            self.note = "Repo  none".into();
+            return;
+        };
+        match Command::new("git").args(["push"]).current_dir(&root).output() {
+            Ok(output) => {
+                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                let err = String::from_utf8_lossy(&output.stderr);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(err.trim());
+                }
+                if text.trim().is_empty() {
+                    text = format!("git push exited {}", output.status);
+                }
+                self.open_split(text.lines().map(str::to_string).collect(), None);
+                if output.status.success() {
+                    self.record("push");
+                    self.persist();
+                    self.links_key.clear();
+                    self.refresh_mesh();
+                } else {
+                    self.note = "push refused".into();
+                }
+            }
+            Err(err) => self.note = format!("git: {err}"),
+        }
+    }
+
     fn paste_image(&mut self, text: &str) {
         let Some(path) = chats::image_path(text).or_else(|| chats::image_path(text.trim())) else {
             if !text.trim().is_empty() {
@@ -920,6 +1039,7 @@ impl App {
                     preview.mark.path.display(),
                     preview.picture
                 );
+                self.image_overlay = inline::choose(&preview.sixel, &preview.kitty, &preview.iterm);
                 self.images.push(preview.mark);
                 self.cmd = token;
                 self.page.clear();
@@ -931,6 +1051,7 @@ impl App {
     }
 
     fn browse(&mut self, target: &str) {
+        self.image_overlay.clear();
         if target.is_empty() {
             self.section = Section::Browser;
             self.mode = Mode::Desk;
@@ -1106,6 +1227,9 @@ impl App {
         };
         if row.dir {
             self.note = "Not a file.".into();
+            return Effect::None;
+        }
+        if self.blocked(&format!("edit {}", row.path.display())) {
             return Effect::None;
         }
         self.edit_path(row.path.clone())
@@ -1318,6 +1442,8 @@ mod tests {
             live: true,
         });
         app.cursor = 0;
+        app.cmd = "accept full".into();
+        app.on_key(Key::Enter);
         app.cmd = "permit bypass".into();
         app.on_key(Key::Enter);
         let grok = std::fs::read_to_string(home.join(".grok/config.toml")).unwrap();
@@ -1364,6 +1490,84 @@ mod tests {
         let porcelain = String::from_utf8_lossy(&porcelain.stdout);
         assert!(porcelain.contains("note.txt"));
         let _ = std::fs::remove_dir_all(home);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ask_holds_a_write_until_the_same_command_repeats() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("granttap-ask-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
+        app.cmd = "commit ship".into();
+        app.on_key(Key::Enter);
+        assert_eq!(app.cmd, "commit ship");
+        assert_eq!(app.note, "ask  repeat to run");
+        app.on_key(Key::Enter);
+        assert!(app.cmd.is_empty());
+        assert_eq!(app.note, "Repo  none");
+        app.cmd = "accept safe".into();
+        app.on_key(Key::Enter);
+        app.cmd = "commit ship".into();
+        app.on_key(Key::Enter);
+        assert_eq!(app.cmd, "commit ship");
+        assert_eq!(app.note, "ask  repeat to run");
+        app.cmd = "accept except-push".into();
+        app.on_key(Key::Enter);
+        app.cmd = "commit ship".into();
+        app.on_key(Key::Enter);
+        assert!(app.cmd.is_empty());
+        assert_eq!(app.note, "Repo  none");
+        app.paused = true;
+        app.cmd = "commit ship".into();
+        app.on_key(Key::Enter);
+        assert_eq!(app.cmd, "commit ship");
+        assert_eq!(app.note, "paused  repeat to run");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn except_push_asks_before_push_and_except_destructive_runs_it() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("granttap-push-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "dev")
+                .env("GIT_AUTHOR_EMAIL", "dev@example.com")
+                .env("GIT_COMMITTER_NAME", "dev")
+                .env("GIT_COMMITTER_EMAIL", "dev@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init"]);
+        std::fs::write(dir.join("readme.txt"), "desk\n").unwrap();
+        git(&["add", "readme.txt"]);
+        git(&["commit", "-m", "start"]);
+        let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
+        app.cmd = "accept except-push".into();
+        app.on_key(Key::Enter);
+        app.cmd = "push".into();
+        app.on_key(Key::Enter);
+        assert_eq!(app.cmd, "push");
+        assert_eq!(app.note, "ask  repeat to run");
+        assert!(matches!(app.mode, Mode::Desk));
+        app.cmd = "accept except-destructive".into();
+        app.on_key(Key::Enter);
+        app.cmd = "push".into();
+        app.on_key(Key::Enter);
+        assert!(app.cmd.is_empty());
+        assert_eq!(app.note, "push refused");
+        assert!(matches!(app.mode, Mode::Split { .. }));
         let _ = std::fs::remove_dir_all(dir);
     }
 

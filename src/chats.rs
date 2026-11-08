@@ -197,17 +197,7 @@ pub fn transcript(path: &Path) -> Vec<String> {
 pub fn write_handoff(home: &Path, chat: &Chat, to: AgentKind) -> Result<PathBuf, String> {
     let dir = home.join(".granttap-term/handoff");
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-    let safe: String = chat
-        .id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let safe = safe_id(&chat.id);
     if safe.is_empty() {
         return Err("chat id is empty".into());
     }
@@ -225,6 +215,27 @@ pub fn write_handoff(home: &Path, chat: &Chat, to: AgentKind) -> Result<PathBuf,
     }
     fs::write(&path, body).map_err(|err| err.to_string())?;
     Ok(path)
+}
+
+pub fn handoff_text(home: &Path, id: &str) -> Result<String, String> {
+    let safe = safe_id(id);
+    if safe.is_empty() {
+        return Err("chat id is empty".into());
+    }
+    let path = home.join(".granttap-term/handoff").join(format!("{safe}.txt"));
+    fs::read_to_string(path).map_err(|_| format!("no handoff {safe}"))
+}
+
+fn safe_id(id: &str) -> String {
+    id.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn clip(line: &str, max: usize) -> String {

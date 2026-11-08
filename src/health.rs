@@ -75,7 +75,10 @@ pub fn picture(root: &Path, roads: bool, externals: bool) -> Vec<String> {
         if deps.is_empty() {
             lines.push("Extern  none".into());
         } else {
-            lines.push(format!("Extern  {}", deps.join("  ")));
+            lines.push("Extern".into());
+            for dep in deps {
+                lines.push(format!("\x1b[38;5;39m▄▄\x1b[38;5;153m  {dep}"));
+            }
         }
     }
     lines
@@ -207,33 +210,23 @@ fn road_lines(files: &[FileTower]) -> Vec<String> {
         let dir = file.rel.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
         for line in file.text.lines() {
             let text = line.trim();
-            let Some(rest) = text.strip_prefix("mod ") else {
-                continue;
-            };
-            let name = rest.trim().trim_end_matches(';').trim();
-            if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-                continue;
+            if let Some(name) = rust_mod(text) {
+                let sibling = join(dir, &format!("{name}.rs"));
+                let nested = join(dir, &format!("{name}/mod.rs"));
+                let _ = push_road(&mut roads, &file.rel, &sibling, files)
+                    || push_road(&mut roads, &file.rel, &nested, files);
             }
-            let sibling = if dir.is_empty() {
-                format!("{name}.rs")
-            } else {
-                format!("{dir}/{name}.rs")
-            };
-            let nested = if dir.is_empty() {
-                format!("{name}/mod.rs")
-            } else {
-                format!("{dir}/{name}/mod.rs")
-            };
-            if files.iter().any(|other| other.rel == sibling || other.rel == nested) {
-                let target = if files.iter().any(|other| other.rel == sibling) {
-                    sibling
-                } else {
-                    nested
-                };
-                let road = format!("{} — {target}", file.rel);
-                if !roads.contains(&road) {
-                    roads.push(road);
+            if let Some(spec) = rust_use(text) {
+                for target in rust_use_files(dir, spec) {
+                    if push_road(&mut roads, &file.rel, &target, files) {
+                        break;
+                    }
                 }
+            }
+            if let Some(spec) = js_import(text)
+                && let Some(target) = resolve_relative(dir, spec, files)
+            {
+                let _ = push_road(&mut roads, &file.rel, &target, files);
             }
             if roads.len() == 12 {
                 return roads;
@@ -241,6 +234,110 @@ fn road_lines(files: &[FileTower]) -> Vec<String> {
         }
     }
     roads
+}
+
+fn push_road(roads: &mut Vec<String>, from: &str, target: &str, files: &[FileTower]) -> bool {
+    if !files.iter().any(|file| file.rel == target) {
+        return false;
+    }
+    let road = format!("{from} — {target}");
+    if !roads.contains(&road) {
+        roads.push(road);
+    }
+    true
+}
+
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+fn rust_mod(text: &str) -> Option<&str> {
+    let name = text.strip_prefix("mod ")?.trim().trim_end_matches(';').trim();
+    if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn rust_use(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("use ")?.trim();
+    let path = rest.split([' ', ';', '{']).next()?.trim();
+    if path.is_empty() { None } else { Some(path) }
+}
+
+fn rust_use_files(dir: &str, spec: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(rest) = spec.strip_prefix("crate::") {
+        let parts: Vec<&str> = rest.split("::").filter(|part| !part.is_empty()).collect();
+        for len in (1..=parts.len()).rev() {
+            let joined = parts[..len].join("/");
+            out.push(format!("src/{joined}.rs"));
+            out.push(format!("src/{joined}/mod.rs"));
+        }
+        return out;
+    }
+    if let Some(rest) = spec.strip_prefix("super::") {
+        let parent = dir.rsplit_once('/').map(|(parent, _)| parent).unwrap_or("");
+        let parts: Vec<&str> = rest.split("::").filter(|part| !part.is_empty()).collect();
+        for len in (1..=parts.len()).rev() {
+            out.push(join(parent, &format!("{}.rs", parts[..len].join("/"))));
+        }
+    }
+    out
+}
+
+fn js_import(text: &str) -> Option<&str> {
+    if let Some(spec) = quoted_after(text, "from ") {
+        return Some(spec);
+    }
+    if let Some(spec) = quoted_after(text, "import ") {
+        return Some(spec);
+    }
+    quoted_after(text, "require(")
+}
+
+fn quoted_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let rest = text.split_once(key)?.1.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    rest[1..].split(quote).next()
+}
+
+fn resolve_relative(dir: &str, spec: &str, files: &[FileTower]) -> Option<String> {
+    if !spec.starts_with('.') {
+        return None;
+    }
+    let mut parts: Vec<&str> = if dir.is_empty() {
+        Vec::new()
+    } else {
+        dir.split('/').collect()
+    };
+    for piece in spec.split('/') {
+        if piece.is_empty() || piece == "." {
+            continue;
+        }
+        if piece == ".." {
+            parts.pop();
+            continue;
+        }
+        parts.push(piece);
+    }
+    let joined = parts.join("/");
+    let mut candidates = vec![joined.clone()];
+    for ext in ["js", "jsx", "ts", "tsx", "mjs", "rs"] {
+        candidates.push(format!("{joined}.{ext}"));
+    }
+    for index in ["index.js", "index.ts", "index.tsx", "mod.rs"] {
+        candidates.push(format!("{joined}/{index}"));
+    }
+    candidates.into_iter().find(|candidate| files.iter().any(|file| &file.rel == candidate))
 }
 
 fn deps_of(root: &Path) -> Vec<String> {
@@ -314,7 +411,27 @@ mod tests {
         assert!(joined.contains("entry"));
         assert!(joined.contains("src/main.rs — src/app.rs"));
         assert!(joined.contains("libc"));
+        assert!(joined.contains("▄▄"));
         assert!(joined.contains("38;5;196"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn roads_follow_use_and_relative_import() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("granttap-roads-{n}"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("web")).unwrap();
+        fs::write(root.join("src/main.rs"), "use crate::app::run;\nfn main() {}\n").unwrap();
+        fs::write(root.join("src/app.rs"), "pub fn run() {}\n").unwrap();
+        fs::write(root.join("web/index.js"), "import {a} from \"./util.js\";\n").unwrap();
+        fs::write(root.join("web/util.js"), "export function a() {}\n").unwrap();
+        let joined = picture(&root, true, false).join("\n");
+        assert!(joined.contains("src/main.rs — src/app.rs"));
+        assert!(joined.contains("web/index.js — web/util.js"));
         let _ = fs::remove_dir_all(root);
     }
 

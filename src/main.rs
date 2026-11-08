@@ -6,6 +6,7 @@ mod gitread;
 mod health;
 mod history;
 mod hl;
+mod inline;
 mod lessons;
 mod mcp;
 mod mesh;

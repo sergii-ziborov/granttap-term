@@ -43,6 +43,7 @@ impl Screen {
         if app.fill {
             screen.line(0, cols, &app.fill_bar(), RED);
             screen.body(app, cols, 1, rows);
+            screen.overlay(app);
             return screen;
         }
         let title = format!(
@@ -84,7 +85,16 @@ impl Screen {
             screen.cursor = Some((3 + app.cmd.chars().count(), input_y + 1));
         }
         screen.tabs(app.section, cols, tab_y);
+        screen.overlay(app);
         screen
+    }
+
+    fn overlay(&mut self, app: &App) {
+        let overlay = app.image_overlay();
+        if !overlay.is_empty() {
+            self.frame.push_str("\x1b[2;1H");
+            self.frame.push_str(overlay);
+        }
     }
 
     pub fn spot_at(&self, x: usize, y: usize) -> Option<Spot> {
