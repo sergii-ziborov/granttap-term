@@ -40,7 +40,7 @@ pub fn handle(line: &str, home: &Path) -> String {
     }
 }
 
-const TOOLS: &str = r#"{"tools":[{"name":"list_chats","description":"Local Grok, Claude, and Codex chats on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"preview_image","description":"Cell preview of a local image for a test.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}]}"#;
+const TOOLS: &str = r#"{"tools":[{"name":"list_chats","description":"Local Grok, Claude, and Codex chats on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"preview_image","description":"Cell preview of a local image for a test.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},{"name":"git_history","description":"Recent commits through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"git_read_blob","description":"UTF-8 file at a revision through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"file":{"type":"string"},"revision":{"type":"string"}},"required":["file"]}},{"name":"browse_page","description":"Text rendering of a local page or http(s) URL for a test.","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},{"name":"list_mesh","description":"Repo, Weavatrix registry, and linked repos for a root.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"list_skills","description":"Claude, Codex, and shared skills visible on this computer.","inputSchema":{"type":"object","properties":{}}}]}"#;
 
 fn call(line: &str, home: &Path) -> String {
     let name = json_string(line, "name").unwrap_or_default();
@@ -97,8 +97,96 @@ fn call(line: &str, home: &Path) -> String {
                 ),
             }
         }
+        "git_history" => text_result(&history_text(&root_arg(line))),
+        "git_read_blob" => {
+            let Some(file) = json_string(line, "file") else {
+                return r#"{"content":[{"type":"text","text":"file is required"}],"isError":true}"#
+                    .into();
+            };
+            let revision = json_string(line, "revision").unwrap_or_else(|| "HEAD".into());
+            match crate::gitread::blob_text(Path::new(&root_arg(line)), &revision, &file, 8_000) {
+                Ok(text) => text_result(&text),
+                Err(err) => error_text(&err),
+            }
+        }
+        "browse_page" => {
+            let Some(url) = json_string(line, "url") else {
+                return r#"{"content":[{"type":"text","text":"url is required"}],"isError":true}"#
+                    .into();
+            };
+            match crate::page::load(&url, &cwd()) {
+                Ok(lines) => text_result(&lines.join("\n")),
+                Err(err) => error_text(&err),
+            }
+        }
+        "list_mesh" => text_result(&mesh_text(home, &root_arg(line))),
+        "list_skills" => {
+            let skills = crate::skills::load(home, &cwd());
+            if skills.is_empty() {
+                text_result("none")
+            } else {
+                let body = skills
+                    .iter()
+                    .map(|skill| format!("{}  {}", skill.agent, skill.name))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                text_result(&body)
+            }
+        }
         _ => r#"{"content":[{"type":"text","text":"unknown tool"}],"isError":true}"#.into(),
     }
+}
+
+fn cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn root_arg(line: &str) -> String {
+    json_string(line, "root").unwrap_or_else(|| cwd().display().to_string())
+}
+
+fn history_text(root: &str) -> String {
+    match crate::gitread::recent(Path::new(root), 12) {
+        Ok(revs) if revs.is_empty() => "No commits.".into(),
+        Ok(revs) => revs
+            .iter()
+            .map(|rev| format!("{}  {}  {}", rev.id, rev.when, rev.subject))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(err) => err,
+    }
+}
+
+fn mesh_text(home: &Path, root: &str) -> String {
+    let root_path = Path::new(root);
+    let repo = crate::mesh::git_root(root_path)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".into());
+    let known = crate::gitread::known_repos(home);
+    let names = if known.is_empty() {
+        "none".into()
+    } else {
+        known
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("Repo  {repo}\nWeavatrix  {names}")
+}
+
+fn text_result(text: &str) -> String {
+    format!(
+        "{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}",
+        quote(text)
+    )
+}
+
+fn error_text(err: &str) -> String {
+    format!(
+        "{{\"content\":[{{\"type\":\"text\",\"text\":{}}}],\"isError\":true}}",
+        quote(err)
+    )
 }
 
 fn ok(id: i64, result: &str) -> String {

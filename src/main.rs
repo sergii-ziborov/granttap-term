@@ -1,15 +1,21 @@
 mod app;
 mod chats;
 mod draw;
+mod gitread;
+mod health;
 mod history;
 mod hl;
 mod lessons;
 mod mcp;
 mod mesh;
 mod model;
+mod page;
 mod sixel;
+mod skills;
+mod store;
 mod term;
 mod ui;
+mod usage;
 
 use std::env;
 use std::path::PathBuf;

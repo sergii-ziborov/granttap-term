@@ -89,6 +89,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "libc",
+ "weavatrix-git",
 ]
 
 [[package]]
@@ -177,6 +178,12 @@ name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
+name = "weavatrix-git"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b431e8f3d66df82182606be05971cbd8838e7e512d5c74eef444bef0f595852"
 
 [[package]]
 name = "weezl"

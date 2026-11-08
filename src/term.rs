@@ -148,6 +148,7 @@ struct Decoder {
     pending: Vec<u8>,
     pending_esc: bool,
     paste: Option<Vec<u8>>,
+    utf8: Vec<u8>,
 }
 
 impl Decoder {
@@ -202,6 +203,11 @@ impl Decoder {
         }
         self.pending.clear();
         self.pending_esc = false;
+        if byte >= 0x80 {
+            self.push_utf8(byte, keys);
+            return;
+        }
+        self.utf8.clear();
         match byte {
             0x03 => keys.push(Key::CtrlC),
             0x0e => keys.push(Key::CtrlN),
@@ -214,20 +220,36 @@ impl Decoder {
                 self.pending.push(0x1b);
                 self.pending_esc = true;
             }
-            b => {
-                if let Some(ch) = utf8_char(b) {
+            b if b >= 0x20 => keys.push(Key::Char(b as char)),
+            _ => keys.push(Key::Ignore),
+        }
+    }
+
+    fn push_utf8(&mut self, byte: u8, keys: &mut Vec<Key>) {
+        self.utf8.push(byte);
+        let need = match self.utf8[0] {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => 0,
+        };
+        if need == 0 || self.utf8.len() > need {
+            self.utf8.clear();
+            keys.push(Key::Ignore);
+            return;
+        }
+        if self.utf8.len() < need {
+            return;
+        }
+        let bytes = std::mem::take(&mut self.utf8);
+        match String::from_utf8(bytes) {
+            Ok(text) => {
+                if let Some(ch) = text.chars().next() {
                     keys.push(Key::Char(ch));
                 }
             }
+            Err(_) => keys.push(Key::Ignore),
         }
-    }
-}
-
-fn utf8_char(byte: u8) -> Option<char> {
-    if byte.is_ascii() && byte >= 0x20 {
-        Some(byte as char)
-    } else {
-        None
     }
 }
 
@@ -356,5 +378,7 @@ mod tests {
         assert_eq!(keys, vec![Key::Wheel(-1)]);
         let keys = dec.feed(b"\x1b[200~/tmp/a.png\x1b[201~");
         assert_eq!(keys, vec![Key::Paste("/tmp/a.png".into())]);
+        let keys = dec.feed(&[0xD1, 0x8F]);
+        assert_eq!(keys, vec![Key::Char('я')]);
     }
 }

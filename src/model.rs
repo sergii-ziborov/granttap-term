@@ -175,13 +175,6 @@ pub struct FileRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Tower {
-    pub name: String,
-    pub height: usize,
-    pub files: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lesson {
     pub title: &'static str,
     pub body: &'static str,

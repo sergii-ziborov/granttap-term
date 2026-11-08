@@ -183,6 +183,17 @@ pub fn files(dir: &Path) -> Vec<crate::model::FileRow> {
         });
     }
     rows.sort_by(|a, b| b.dir.cmp(&a.dir).then(a.name.cmp(&b.name)));
+    if let Some(parent) = dir.parent().filter(|parent| *parent != dir) {
+        rows.insert(
+            0,
+            crate::model::FileRow {
+                name: "..".into(),
+                icon: '<',
+                dir: true,
+                path: parent.to_path_buf(),
+            },
+        );
+    }
     rows
 }
 

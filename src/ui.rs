@@ -40,6 +40,11 @@ impl Screen {
             screen.line(0, cols, "too small   F10 quits", RED);
             return screen;
         }
+        if app.fill {
+            screen.line(0, cols, &app.fill_bar(), RED);
+            screen.body(app, cols, 1, rows);
+            return screen;
+        }
         let title = format!(
             "GrantTap Term  {}  accept {}",
             app.section.label(),
@@ -65,7 +70,7 @@ impl Screen {
         };
         screen.line(desc_y, cols, &desc, DIM);
         screen.hit(0, desc_y, cols, Spot::Desc);
-        let input = format!("$ {}", app.cmd);
+        let input = format!("\x1b[38;5;196m❯\x1b[38;5;39m {}", app.cmd);
         screen.line(input_y, cols, &input, PLAIN);
         screen.hit(0, input_y, cols.saturating_sub(8), Spot::Cmd);
         let vim = if app.vim { "Vim on" } else { "Vim off" };
@@ -76,7 +81,7 @@ impl Screen {
             if app.vim { BLUE } else { DIM },
         );
         if app.note.is_empty() && app.mode_is_desk() {
-            screen.cursor = Some((3 + app.cmd.chars().count() + 1, input_y + 1));
+            screen.cursor = Some((3 + app.cmd.chars().count(), input_y + 1));
         }
         screen.tabs(app.section, cols, tab_y);
         screen
@@ -96,10 +101,16 @@ impl Screen {
             self.line(y0, cols, app.empty_line(), DIM);
             return;
         }
-        for (index, line) in lines.iter().enumerate().take(room) {
-            let y = y0 + index;
-            let ink = if index == app.cursor { RED } else { PLAIN };
-            let mark = if index == app.cursor { '>' } else { ' ' };
+        let start = if app.mode_is_desk() {
+            app.cursor.saturating_sub(room.saturating_sub(1))
+        } else {
+            app.scroll.min(lines.len().saturating_sub(room.max(1)))
+        };
+        for (index, line) in lines.iter().enumerate().skip(start).take(room) {
+            let y = y0 + index - start;
+            let selected = app.mode_is_desk() && index == app.cursor;
+            let ink = if selected { RED } else { PLAIN };
+            let mark = if selected { '>' } else { ' ' };
             self.line(y, cols, &format!("{mark} {line}"), ink);
             self.hit(0, y, cols, Spot::Row(index));
         }
