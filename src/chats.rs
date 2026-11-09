@@ -481,10 +481,13 @@ fn pieces_in_array(array: &str) -> Vec<Piece> {
                     out.push(Piece::Text(text));
                 }
             }
-            "tool_use" => {
-                if let Some(name) = json_string(from, "name") {
+            "tool_use" | "function_call" | "custom_tool_call" | "tool_call" => {
+                if let Some(name) = call_name(from) {
                     out.push(Piece::Tool(name));
                 }
+            }
+            "CommandExecution" | "ReadFile" | "FileChange" | "list_files" => {
+                out.push(Piece::Tool(kind.clone()));
             }
             _ => {}
         }
@@ -611,11 +614,8 @@ fn turn_lines(line: &str) -> Vec<String> {
     if !trimmed.starts_with('{') {
         return vec![clip(&one_line(trimmed), 4000)];
     }
-    let Some(kind) = speaker(trimmed) else {
-        return Vec::new();
-    };
-    match kind {
-        "user" => {
+    match speaker(trimmed) {
+        Some("user") => {
             let mut out = Vec::new();
             if let Some(value) = json_value_after(trimmed, "content") {
                 emit_pieces(&mut out, "user  ", &content_pieces(value));
@@ -624,9 +624,90 @@ fn turn_lines(line: &str) -> Vec<String> {
             }
             out
         }
-        "assistant" => assistant_lines(trimmed),
-        _ => Vec::new(),
+        Some("assistant") => assistant_lines(trimmed),
+        _ => spine(trimmed),
     }
+}
+
+fn spine(line: &str) -> Vec<String> {
+    if let Some("developer" | "system" | "tool") = json_string(line, "role").as_deref() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut rest = line;
+    let mut saw_text = false;
+    while out.len() < 64 {
+        let Some((kind, at)) = next_type(rest) else {
+            break;
+        };
+        let from = after_type_value(&rest[at..]);
+        match kind.as_str() {
+            "tool_use" | "function_call" | "custom_tool_call" | "tool_call" => {
+                if let Some(name) = call_name(from) {
+                    push_tool(&mut out, &name);
+                }
+            }
+            "CommandExecution" | "ReadFile" | "FileChange" | "list_files" => {
+                push_tool(&mut out, &kind);
+            }
+            "AgentMessage" | "output_text" | "input_text" | "text" | "Text" if !saw_text => {
+                if let Some(text) = message_text(from)
+                    && !text.is_empty()
+                {
+                    let prefix = if kind == "input_text" {
+                        "user  "
+                    } else {
+                        "assistant  "
+                    };
+                    emit_pieces(&mut out, prefix, &[Piece::Text(text)]);
+                    saw_text = true;
+                }
+            }
+            _ => {}
+        }
+        let skip = at + "\"type\"".len();
+        if skip >= rest.len() {
+            break;
+        }
+        rest = &rest[skip..];
+    }
+    out
+}
+
+fn call_name(from: &str) -> Option<String> {
+    let end = ["\"arguments\"", "\"input\"", "\"command\"", "\"output\""]
+        .iter()
+        .filter_map(|needle| from.find(needle))
+        .min()
+        .unwrap_or(from.len());
+    let name = json_string(&from[..end], "name")?;
+    if is_ident(&name) { Some(name) } else { None }
+}
+
+fn message_text(from: &str) -> Option<String> {
+    let end = [
+        "\"arguments\"",
+        "\"input\"",
+        "\"command\"",
+        "\"output\"",
+        "\"encrypted_content\"",
+    ]
+    .iter()
+    .filter_map(|needle| from.find(needle))
+    .min()
+    .unwrap_or(from.len());
+    let slice = &from[..end];
+    if let Some(text) = json_string(slice, "text")
+        && !text.is_empty()
+    {
+        return Some(text);
+    }
+    let value = json_value_after(slice, "content")?;
+    if !value.starts_with('"') {
+        return None;
+    }
+    let text = parse_json_string(value)?;
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn tool_names(line: &str) -> Vec<String> {
@@ -1661,6 +1742,32 @@ mod tests {
         assert!(before < tool && tool < after, "{joined}");
         assert!(lines.iter().any(|line| line == "user  Привет"), "{joined}");
         assert!(!joined.contains("SECRETARGS"), "{joined}");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn codex_calls_keep_the_name_and_the_reply() {
+        let home = scratch();
+        let path = home.join("rollout.jsonl");
+        fs::write(
+            &path,
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"SECRETARGS\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"read_file\",\"input\":\"SECRETARGS\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"AgentMessage\",\"content\":[{\"type\":\"Text\",\"text\":\"the desk stays\"}]}}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"CommandExecution\",\"command\":\"SECRETARGS\"}}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\",\"output\":\"SECRETARGS\",\"text\":\"SECRETARGS\"}}\n{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"hidden\"}]}}\n",
+        )
+        .unwrap();
+        let lines = transcript_full(&path);
+        let joined = lines.join("\n");
+        assert!(lines.iter().any(|line| line == "tool  shell"), "{joined}");
+        assert!(lines.iter().any(|line| line == "tool  read_file"), "{joined}");
+        assert!(
+            lines.iter().any(|line| line == "assistant  the desk stays"),
+            "{joined}"
+        );
+        assert!(
+            lines.iter().any(|line| line == "tool  CommandExecution"),
+            "{joined}"
+        );
+        assert!(!joined.contains("SECRETARGS"), "{joined}");
+        assert!(!joined.contains("hidden"), "{joined}");
         let _ = fs::remove_dir_all(home);
     }
 
