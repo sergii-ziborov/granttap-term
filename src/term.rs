@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
@@ -20,6 +20,7 @@ pub enum Key {
     CtrlV,
     Click { x: usize, y: usize },
     Wheel(i8),
+    Page(i8),
     Paste(String),
     Ignore,
 }
@@ -60,7 +61,9 @@ impl Term {
         termios_set(0, &raw)?;
         self.on = true;
         let mut out = io::stdout().lock();
-        out.write_all(b"\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1000h\x1b[?1006h")?;
+        out.write_all(
+            b"\x1b[?1049h\x1b[?7l\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b]11;#000000\x07\x1b[3J",
+        )?;
         out.flush()?;
         Ok(())
     }
@@ -73,14 +76,16 @@ impl Term {
         let restored = termios_set(0, &self.original);
         let mut out = io::stdout().lock();
         let written = out
-            .write_all(b"\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[0m\x1b[?25h\x1b[?7h\x1b[?1049l")
+            .write_all(
+                b"\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b]111\x07\x1b[0m\x1b[?25h\x1b[?7h\x1b[?1049l",
+            )
             .and_then(|()| out.flush());
         restored.and(written)
     }
 
     pub fn present(&mut self, frame: &str, cursor: Option<(usize, usize)>) -> io::Result<()> {
         self.out.clear();
-        self.out.push_str("\x1b[?25l");
+        self.out.push_str("\x1b[?25l\x1b[48;5;0m\x1b[2J\x1b[H");
         self.out.push_str(frame);
         if let Some((col, row)) = cursor {
             push_cup(&mut self.out, row, col);
@@ -102,7 +107,7 @@ impl Term {
     }
 
     pub fn poll(&mut self) -> io::Result<Polled> {
-        let wait = if self.dec.pending_esc { 30 } else { 100 };
+        let wait = if self.dec.pending == [0x1b] { 280 } else { 100 };
         let mut pfd = libc::pollfd {
             fd: 0,
             events: libc::POLLIN,
@@ -111,23 +116,35 @@ impl Term {
         let rc = unsafe { libc::poll(&mut pfd, 1, wait) };
         if rc < 0 {
             let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
+            if err.kind() == ErrorKind::Interrupted || Self::tty() {
                 return Ok(Polled::Keys(self.dec.expire()));
             }
             return Err(err);
         }
         let hup = (pfd.revents & libc::POLLHUP) != 0;
         let readable = (pfd.revents & libc::POLLIN) != 0;
-        if hup && !readable {
-            return Ok(Polled::Eof);
-        }
         if !readable {
+            if hup && !Self::tty() {
+                return Ok(Polled::Eof);
+            }
             return Ok(Polled::Keys(self.dec.expire()));
         }
         let mut buf = [0u8; 256];
-        let n = io::stdin().read(&mut buf)?;
+        let n = match io::stdin().read(&mut buf) {
+            Ok(n) => n,
+            Err(err)
+                if err.kind() == ErrorKind::Interrupted || err.kind() == ErrorKind::WouldBlock =>
+            {
+                return Ok(Polled::Keys(self.dec.expire()));
+            }
+            Err(_) if Self::tty() => return Ok(Polled::Keys(self.dec.expire())),
+            Err(err) => return Err(err),
+        };
         if n == 0 {
-            return Ok(Polled::Keys(Vec::new()));
+            if Self::tty() {
+                return Ok(Polled::Keys(Vec::new()));
+            }
+            return Ok(Polled::Eof);
         }
         Ok(Polled::Keys(self.dec.feed(&buf[..n])))
     }
@@ -195,9 +212,10 @@ impl Decoder {
                 self.pending.clear();
                 self.pending_esc = false;
                 keys.push(key);
-            } else if self.pending.len() > 48 {
+            } else if self.pending.len() > 48 || csi_finished(&self.pending) {
                 self.pending.clear();
                 self.pending_esc = false;
+                keys.push(Key::Ignore);
             }
             return;
         }
@@ -253,7 +271,34 @@ impl Decoder {
     }
 }
 
+fn csi_finished(buf: &[u8]) -> bool {
+    if buf.len() < 2 || buf[0] != 0x1b {
+        return false;
+    }
+    if buf[1] != b'[' && buf[1] != b'O' {
+        return true;
+    }
+    if buf.starts_with(b"\x1b[M") {
+        return buf.len() >= 6;
+    }
+    match buf[2..].last() {
+        Some(b'~' | b'M' | b'm') => true,
+        Some(byte) if byte.is_ascii_alphabetic() => true,
+        _ => false,
+    }
+}
+
 fn csi(buf: &[u8]) -> Option<Key> {
+    if let Some(rest) = buf.strip_prefix(b"\x1b[M") {
+        if rest.len() < 3 {
+            return None;
+        }
+        return Some(mouse_button(
+            i32::from(rest[0].saturating_sub(32)),
+            usize::from(rest[1].saturating_sub(32)),
+            usize::from(rest[2].saturating_sub(32)),
+        ));
+    }
     if buf == b"\x1b[A" {
         return Some(Key::Up);
     }
@@ -289,6 +334,8 @@ fn csi(buf: &[u8]) -> Option<Key> {
                 "12" => Some(Key::F(2)),
                 "13" => Some(Key::F(3)),
                 "14" => Some(Key::F(4)),
+                "5" => Some(Key::Page(-1)),
+                "6" => Some(Key::Page(1)),
                 _ => None,
             };
         }
@@ -319,16 +366,24 @@ fn mouse(rest: &[u8]) -> Option<Key> {
     let button: i32 = parts.next()?.parse().ok()?;
     let x: usize = parts.next()?.parse().ok()?;
     let y: usize = parts.next()?.parse().ok()?;
+    Some(mouse_button(button, x, y))
+}
+
+fn mouse_button(button: i32, x: usize, y: usize) -> Key {
     if button & 32 != 0 {
-        return Some(Key::Ignore);
+        return Key::Ignore;
     }
     if button & 64 != 0 {
-        return Some(Key::Wheel(if button & 1 == 0 { -1 } else { 1 }));
+        let which = button & 3;
+        if which <= 1 {
+            return Key::Wheel(if which == 0 { -1 } else { 1 });
+        }
+        return Key::Ignore;
     }
-    if button & 3 == 0 {
-        return Some(Key::Click { x, y });
+    if button & 3 == 0 && x > 0 && y > 0 {
+        return Key::Click { x, y };
     }
-    Some(Key::Ignore)
+    Key::Ignore
 }
 
 fn winsize(fd: i32) -> Option<(usize, usize)> {
@@ -374,8 +429,30 @@ mod tests {
         let mut dec = Decoder::default();
         let keys = dec.feed(b"\x1b[<0;4;5M");
         assert_eq!(keys, vec![Key::Click { x: 4, y: 5 }]);
+        let keys = dec.feed(b"\x1b[<0;4;5m");
+        assert_eq!(keys, vec![Key::Ignore]);
+        assert!(dec.expire().is_empty());
+        let keys = dec.feed(b"\x1b[<0;4;5M\x1b[<0;4;5m\x1b[<0;4;5M\x1b[<0;4;5m");
+        assert_eq!(
+            keys.iter()
+                .filter(|key| matches!(key, Key::Click { .. }))
+                .count(),
+            2
+        );
+        assert!(!keys.contains(&Key::Esc));
+        let keys = dec.feed(b"\x1b[M\x20\x24\x25");
+        assert_eq!(keys, vec![Key::Click { x: 4, y: 5 }]);
+        assert!(dec.feed(b"\x1b").is_empty());
+        let keys = dec.feed(b"[<0;9;2M");
+        assert_eq!(keys, vec![Key::Click { x: 9, y: 2 }]);
+        assert!(dec.feed(b"\x1b").is_empty());
+        assert_eq!(dec.expire(), vec![Key::Esc]);
         let keys = dec.feed(b"\x1b[<64;1;1M");
         assert_eq!(keys, vec![Key::Wheel(-1)]);
+        let keys = dec.feed(b"\x1b[5~");
+        assert_eq!(keys, vec![Key::Page(-1)]);
+        let keys = dec.feed(b"\x1b[6~");
+        assert_eq!(keys, vec![Key::Page(1)]);
         let keys = dec.feed(b"\x1b[200~/tmp/a.png\x1b[201~");
         assert_eq!(keys, vec![Key::Paste("/tmp/a.png".into())]);
         let keys = dec.feed(&[0xD1, 0x8F]);

@@ -66,7 +66,9 @@ pub fn load(home: &Path) -> DeskState {
             Some("H") => {
                 let Some(root) = parts.next() else { continue };
                 let Some(roads) = parts.next() else { continue };
-                let Some(externals) = parts.next() else { continue };
+                let Some(externals) = parts.next() else {
+                    continue;
+                };
                 state
                     .mesh_health
                     .push((root.to_string(), roads != "0", externals != "0"));
@@ -190,7 +192,10 @@ mod tests {
         state.history.push("mesh".into());
         save(&home, &state).unwrap();
         let loaded = load(&home);
-        assert_eq!(loaded.mesh_accept, vec![("/repo".into(), AcceptLevel::Safe)]);
+        assert_eq!(
+            loaded.mesh_accept,
+            vec![("/repo".into(), AcceptLevel::Safe)]
+        );
         assert_eq!(loaded.chat_accept, vec![("abc".into(), AcceptLevel::Full)]);
         assert!(loaded.paused);
         assert_eq!(loaded.permit, Permit::Plan);

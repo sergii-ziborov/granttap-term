@@ -12,7 +12,10 @@ pub fn detect() -> Option<Proto> {
         &env::var("TERM").unwrap_or_default(),
         &env::var("TERM_PROGRAM").unwrap_or_default(),
         env::var_os("KITTY_WINDOW_ID").is_some()
-            || env::var("TERM").unwrap_or_default().to_ascii_lowercase().contains("kitty"),
+            || env::var("TERM")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("kitty"),
         env::var("LC_TERMINAL").unwrap_or_default() == "iTerm2",
     )
 }
@@ -101,7 +104,9 @@ fn b64(data: &[u8]) -> String {
     let mut out = String::new();
     let mut index = 0;
     while index + 3 <= data.len() {
-        let n = u32::from(data[index]) << 16 | u32::from(data[index + 1]) << 8 | u32::from(data[index + 2]);
+        let n = u32::from(data[index]) << 16
+            | u32::from(data[index + 1]) << 8
+            | u32::from(data[index + 2]);
         out.push(TABLE[((n >> 18) & 63) as usize] as char);
         out.push(TABLE[((n >> 12) & 63) as usize] as char);
         out.push(TABLE[((n >> 6) & 63) as usize] as char);
@@ -131,10 +136,22 @@ mod tests {
 
     #[test]
     fn protocols_follow_the_terminal_name() {
-        assert_eq!(detect_from("xterm-kitty", "", false, false), Some(Proto::Kitty));
-        assert_eq!(detect_from("xterm", "iTerm.app", false, false), Some(Proto::Iterm));
-        assert_eq!(detect_from("xterm", "WezTerm", false, false), Some(Proto::Sixel));
-        assert_eq!(detect_from("xterm-256color", "Apple_Terminal", false, false), None);
+        assert_eq!(
+            detect_from("xterm-kitty", "", false, false),
+            Some(Proto::Kitty)
+        );
+        assert_eq!(
+            detect_from("xterm", "iTerm.app", false, false),
+            Some(Proto::Iterm)
+        );
+        assert_eq!(
+            detect_from("xterm", "WezTerm", false, false),
+            Some(Proto::Sixel)
+        );
+        assert_eq!(
+            detect_from("xterm-256color", "Apple_Terminal", false, false),
+            None
+        );
     }
 
     #[test]

@@ -75,7 +75,7 @@ pub fn half_blocks(width: usize, height: usize, rgb: &[u8]) -> String {
             }
             out.push('▀');
         }
-        out.push_str("\x1b[0m\n");
+        out.push_str("\x1b[0;48;5;0m\n");
         y += 2;
     }
     out

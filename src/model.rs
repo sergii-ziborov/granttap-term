@@ -140,7 +140,10 @@ pub struct Chat {
     pub id: String,
     pub title: String,
     pub path: PathBuf,
+    pub cwd: String,
     pub live: bool,
+    pub at: i64,
+    pub tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

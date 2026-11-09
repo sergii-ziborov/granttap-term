@@ -12,8 +12,8 @@ mod mcp;
 mod mesh;
 mod model;
 mod page;
-mod sixel;
 mod shot;
+mod sixel;
 mod skills;
 mod store;
 mod term;
@@ -21,11 +21,12 @@ mod ui;
 mod usage;
 
 use std::env;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use app::{App, Effect};
-use term::{Key, Polled, Term};
+use term::{Polled, Term};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -72,43 +73,34 @@ fn main() -> ExitCode {
     };
     loop {
         let (cols, rows) = Term::size();
+        if cols == 0 || rows == 0 {
+            match term.poll() {
+                Ok(Polled::Eof) if !Term::tty() => break,
+                Ok(_) => continue,
+                Err(_) if Term::tty() => continue,
+                Err(_) => break,
+            }
+        }
         let screen = ui::Screen::paint(&app, cols, rows);
-        if term.present(&screen.frame, screen.cursor).is_err() {
-            break;
+        if let Err(err) = term.present(&screen.frame, screen.cursor) {
+            let kind = err.kind();
+            let soft = kind == ErrorKind::Interrupted || kind == ErrorKind::WouldBlock;
+            if !soft && !Term::tty() {
+                break;
+            }
         }
         let polled = match term.poll() {
             Ok(polled) => polled,
+            Err(_) if Term::tty() => continue,
             Err(_) => break,
         };
         let Polled::Keys(keys) = polled else {
+            if Term::tty() {
+                continue;
+            }
             break;
         };
-        let mut quit = false;
-        for key in keys {
-            let effect = if let Key::Click { x, y } = key {
-                if x == 0 || y == 0 {
-                    Effect::None
-                } else {
-                    match screen.spot_at(x - 1, y - 1) {
-                        Some(spot) => app.on_spot(spot),
-                        None => Effect::None,
-                    }
-                }
-            } else {
-                app.on_key(key)
-            };
-            match effect {
-                Effect::Quit => quit = true,
-                Effect::Edit(path) => {
-                    let _ = term.suspend();
-                    app::edit(&path, &app.dir);
-                    let _ = term.resume();
-                    app.reload();
-                }
-                Effect::None => {}
-            }
-        }
-        if quit {
+        if app.apply_keys(&keys, |x, y| screen.spot_at(x, y)) == Effect::Quit {
             break;
         }
     }

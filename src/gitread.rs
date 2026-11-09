@@ -28,7 +28,12 @@ pub fn recent(root: &Path, max: usize) -> Result<Vec<Rev>, String> {
         .collect())
 }
 
-pub fn blob_text(root: &Path, revision: &str, path: &str, max_bytes: usize) -> Result<String, String> {
+pub fn blob_text(
+    root: &Path,
+    revision: &str,
+    path: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
     let repo = Repository::open(root).map_err(|err| err.to_string())?;
     let snap = repo.snapshot(revision).map_err(|err| err.to_string())?;
     let want = normalize(path);
@@ -41,9 +46,8 @@ pub fn blob_text(root: &Path, revision: &str, path: &str, max_bytes: usize) -> R
     if object.kind != ObjectKind::Blob {
         return Err(format!("{want} is a {}, not a blob", object.kind.as_str()));
     }
-    let text = std::str::from_utf8(&object.data).map_err(|_| {
-        format!("blob {} is not UTF-8 text", entry.id)
-    })?;
+    let text = std::str::from_utf8(&object.data)
+        .map_err(|_| format!("blob {} is not UTF-8 text", entry.id))?;
     let mut end = max_bytes.min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -121,8 +125,12 @@ pub fn linked(repos: &[(String, PathBuf)]) -> Result<Vec<String>, String> {
     if repos.len() < 2 {
         return Ok(Vec::new());
     }
-    let set = RepositorySet::open(repos.iter().map(|(name, path)| (name.clone(), path.clone())))
-        .map_err(|err| err.to_string())?;
+    let set = RepositorySet::open(
+        repos
+            .iter()
+            .map(|(name, path)| (name.clone(), path.clone())),
+    )
+    .map_err(|err| err.to_string())?;
     let shared = set
         .shared_commits(HistoryOptions {
             max_commits: 40,
@@ -154,7 +162,10 @@ pub fn linked(repos: &[(String, PathBuf)]) -> Result<Vec<String>, String> {
 
 fn snap_has(repo: &Repository, revision: &str, path: &str) -> Result<bool, String> {
     let snap = repo.snapshot(revision).map_err(|err| err.to_string())?;
-    Ok(snap.entries.iter().any(|entry| entry.path == path.as_bytes()))
+    Ok(snap
+        .entries
+        .iter()
+        .any(|entry| entry.path == path.as_bytes()))
 }
 
 fn rev_from(commit: &weavatrix_git::Commit) -> Rev {
@@ -173,9 +184,7 @@ fn rev_from(commit: &weavatrix_git::Commit) -> Rev {
 }
 
 fn normalize(path: &str) -> String {
-    path.trim()
-        .trim_start_matches("./")
-        .replace('\\', "/")
+    path.trim().trim_start_matches("./").replace('\\', "/")
 }
 
 fn next_key(text: &str, key: &str) -> Option<String> {

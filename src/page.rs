@@ -58,6 +58,18 @@ fn fetch(url: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn render(html: &str) -> Vec<String> {
+    if !looks_html(html) {
+        let mut lines: Vec<String> = html
+            .lines()
+            .map(|line| clip(line.trim_end(), 200))
+            .filter(|line| !line.is_empty())
+            .collect();
+        if lines.is_empty() {
+            lines.push("Empty page.".into());
+        }
+        lines.truncate(180);
+        return lines;
+    }
     let lower = html.to_ascii_lowercase();
     let mut title = String::new();
     if let Some(start) = lower.find("<title")
@@ -134,7 +146,8 @@ impl Build {
                 && let Some(content) = attr(raw, "content")
             {
                 self.flush();
-                self.lines.push(clip(&format!("meta  {}", decode(&content)), 200));
+                self.lines
+                    .push(clip(&format!("meta  {}", decode(&content)), 200));
             }
             return;
         }
@@ -143,7 +156,8 @@ impl Build {
             let name = attr(raw, "name")
                 .or_else(|| attr(raw, "placeholder"))
                 .unwrap_or_else(|| "field".into());
-            self.lines.push(clip(&format!("[field] {}", decode(&name)), 200));
+            self.lines
+                .push(clip(&format!("[field] {}", decode(&name)), 200));
             return;
         }
         if tag_is(&low, "<pre") {
@@ -345,13 +359,19 @@ impl Build {
     }
 }
 
+fn looks_html(text: &str) -> bool {
+    let head: String = text.chars().take(2000).collect();
+    let lower = head.to_ascii_lowercase();
+    ["<html", "<body", "<p", "<div", "<title"]
+        .iter()
+        .any(|tag| lower.contains(tag))
+}
+
 fn tag_is(low: &str, name: &str) -> bool {
     let Some(rest) = low.strip_prefix(name) else {
         return false;
     };
-    rest.is_empty()
-        || rest.starts_with([' ', '>', '/'])
-        || rest.starts_with('\t')
+    rest.is_empty() || rest.starts_with([' ', '>', '/']) || rest.starts_with('\t')
 }
 
 fn image_mark(tag: &str) -> String {
@@ -411,6 +431,15 @@ fn clip(line: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_keeps_angle_brackets() {
+        let lines = render("# Desk\n\nUse `a < b` in the repo.\n\n- one\n");
+        let joined = lines.join("\n");
+        assert!(joined.contains("a < b"), "{joined}");
+        assert!(joined.contains("# Desk"), "{joined}");
+        assert!(joined.contains("- one"), "{joined}");
+    }
 
     #[test]
     fn page_keeps_the_title_and_drops_script() {

@@ -38,7 +38,12 @@ pub fn picture(root: &Path, roads: bool, externals: bool) -> Vec<String> {
     if files.is_empty() {
         lines.push("No towers.".into());
     }
-    files.sort_by(|a, b| a.module.cmp(&b.module).then(b.height.cmp(&a.height)).then(a.rel.cmp(&b.rel)));
+    files.sort_by(|a, b| {
+        a.module
+            .cmp(&b.module)
+            .then(b.height.cmp(&a.height))
+            .then(a.rel.cmp(&b.rel))
+    });
     let mut module = String::new();
     for (shown, file) in files.iter().enumerate() {
         if shown == 36 {
@@ -57,7 +62,7 @@ pub fn picture(root: &Path, roads: bool, externals: bool) -> Vec<String> {
             .map(|(_, name)| name)
             .unwrap_or(file.rel.as_str());
         lines.push(format!(
-            "\x1b[38;5;{}m{bar}\x1b[38;5;153m  {short}  {} lines  {} sym{entry}",
+            "\x1b[38;5;{}m{bar}\x1b[38;5;203m  {short}  {} lines  {} sym{entry}",
             file.ink, file.lines, file.symbols
         ));
     }
@@ -77,7 +82,7 @@ pub fn picture(root: &Path, roads: bool, externals: bool) -> Vec<String> {
         } else {
             lines.push("Extern".into());
             for dep in deps {
-                lines.push(format!("\x1b[38;5;39m▄▄\x1b[38;5;153m  {dep}"));
+                lines.push(format!("\x1b[38;5;39m▄▄\x1b[38;5;203m  {dep}"));
             }
         }
     }
@@ -107,7 +112,11 @@ pub fn env_example_keys(root: &Path) -> Vec<String> {
             continue;
         };
         let key = key.trim();
-        if key.is_empty() || !key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
             continue;
         }
         keys.push(key.to_string());
@@ -157,7 +166,11 @@ fn walk(root: &Path, dir: &Path, depth: usize, dirs: &mut usize, out: &mut Vec<F
 }
 
 fn tower(root: &Path, path: &Path) -> Option<FileTower> {
-    let rel = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+    let rel = path
+        .strip_prefix(root)
+        .ok()?
+        .to_string_lossy()
+        .replace('\\', "/");
     if rel.ends_with(".lock") || rel.ends_with(".png") || rel.ends_with(".jpg") {
         return None;
     }
@@ -174,9 +187,16 @@ fn tower(root: &Path, path: &Path) -> Option<FileTower> {
         Some((dir, _)) => dir.split('/').next().unwrap_or(dir).to_string(),
         None => "(root)".into(),
     };
-    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-    let entry = matches!(name, "main.rs" | "lib.rs" | "index.js" | "index.ts" | "index.tsx")
-        || text.lines().any(|line| line.trim() == "fn main()" || line.trim().starts_with("fn main("));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let entry = matches!(
+        name,
+        "main.rs" | "lib.rs" | "index.js" | "index.ts" | "index.tsx"
+    ) || text
+        .lines()
+        .any(|line| line.trim() == "fn main()" || line.trim().starts_with("fn main("));
     Some(FileTower {
         ink: ink_code(name),
         rel,
@@ -191,13 +211,28 @@ fn tower(root: &Path, path: &Path) -> Option<FileTower> {
 
 fn is_symbol(line: &str) -> bool {
     let mut text = line.trim();
-    for prefix in ["pub(crate) ", "pub ", "export default ", "export ", "async ", "default "] {
+    for prefix in [
+        "pub(crate) ",
+        "pub ",
+        "export default ",
+        "export ",
+        "async ",
+        "default ",
+    ] {
         if let Some(rest) = text.strip_prefix(prefix) {
             text = rest.trim_start();
         }
     }
     [
-        "fn ", "struct ", "enum ", "trait ", "impl ", "class ", "def ", "func ", "function ",
+        "fn ",
+        "struct ",
+        "enum ",
+        "trait ",
+        "impl ",
+        "class ",
+        "def ",
+        "func ",
+        "function ",
         "type ",
     ]
     .iter()
@@ -256,8 +291,16 @@ fn join(dir: &str, name: &str) -> String {
 }
 
 fn rust_mod(text: &str) -> Option<&str> {
-    let name = text.strip_prefix("mod ")?.trim().trim_end_matches(';').trim();
-    if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+    let name = text
+        .strip_prefix("mod ")?
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
         None
     } else {
         Some(name)
@@ -337,7 +380,9 @@ fn resolve_relative(dir: &str, spec: &str, files: &[FileTower]) -> Option<String
     for index in ["index.js", "index.ts", "index.tsx", "mod.rs"] {
         candidates.push(format!("{joined}/{index}"));
     }
-    candidates.into_iter().find(|candidate| files.iter().any(|file| &file.rel == candidate))
+    candidates
+        .into_iter()
+        .find(|candidate| files.iter().any(|file| &file.rel == candidate))
 }
 
 fn deps_of(root: &Path) -> Vec<String> {
@@ -425,9 +470,17 @@ mod tests {
         let root = std::env::temp_dir().join(format!("granttap-roads-{n}"));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("web")).unwrap();
-        fs::write(root.join("src/main.rs"), "use crate::app::run;\nfn main() {}\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "use crate::app::run;\nfn main() {}\n",
+        )
+        .unwrap();
         fs::write(root.join("src/app.rs"), "pub fn run() {}\n").unwrap();
-        fs::write(root.join("web/index.js"), "import {a} from \"./util.js\";\n").unwrap();
+        fs::write(
+            root.join("web/index.js"),
+            "import {a} from \"./util.js\";\n",
+        )
+        .unwrap();
         fs::write(root.join("web/util.js"), "export function a() {}\n").unwrap();
         let joined = picture(&root, true, false).join("\n");
         assert!(joined.contains("src/main.rs — src/app.rs"));

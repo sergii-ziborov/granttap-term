@@ -19,10 +19,10 @@ use crate::store;
 use crate::term::Key;
 use crate::usage;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
     None,
     Quit,
-    Edit(PathBuf),
 }
 
 pub struct App {
@@ -30,9 +30,9 @@ pub struct App {
     pub cmd: String,
     pub cursor: usize,
     pub scroll: usize,
+    pub pane_from_end: usize,
     pub suggest: usize,
     pub note: String,
-    pub vim: bool,
     pub accept: AcceptLevel,
     pub paused: bool,
     pub permit: Permit,
@@ -62,14 +62,20 @@ pub struct App {
     links_key: String,
     dirty: Vec<String>,
     questions_line: String,
+    asks: Vec<agents::Ask>,
     mesh_health: Vec<(String, bool, bool)>,
     confirm: String,
     image_overlay: String,
+    repos: Vec<(String, PathBuf)>,
+    vim_path: Option<PathBuf>,
+    pane_key: String,
 }
 
 enum Mode {
     Desk,
-    View { lines: Vec<String> },
+    View {
+        lines: Vec<String>,
+    },
     Split {
         lines: Vec<String>,
         agent: Option<AgentKind>,
@@ -109,7 +115,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "permit",
         "Set permission mode and write it into the agent config: ask, edits, bypass, plan.",
     ),
-    ("model", "Set the model on the selected agent and its config."),
+    (
+        "model",
+        "Set the model on the selected agent and its config.",
+    ),
     (
         "effort",
         "Set model effort within that agent's catalog and write it into the config.",
@@ -123,8 +132,14 @@ const COMMANDS: &[(&str, &str)] = &[
     ("desc", "Open the command description in the lower split."),
     ("browse", "Draw a local file or http(s) page in a split."),
     ("history", "Read recent commits through Weavatrix git."),
-    ("blob", "Read a file at HEAD through Weavatrix git: blob <path>."),
-    ("health", "Toggle mesh code-health: health roads, or health extern."),
+    (
+        "blob",
+        "Read a file at HEAD through Weavatrix git: blob <path>.",
+    ),
+    (
+        "health",
+        "Toggle mesh code-health: health roads, or health extern.",
+    ),
     ("skill", "Open a shared skill file: skill <name>."),
     (
         "commit",
@@ -134,7 +149,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "push",
         "Push with git push. except-destructive and full run it. Every other level asks once, then the same command repeats.",
     ),
-    ("fill", "Expand the open split to the whole terminal, or collapse it."),
+    (
+        "fill",
+        "Expand the open split to the whole terminal, or collapse it.",
+    ),
 ];
 
 impl App {
@@ -146,9 +164,9 @@ impl App {
             cmd: String::new(),
             cursor: 0,
             scroll: 0,
+            pane_from_end: 0,
             suggest: 0,
             note: String::new(),
-            vim: false,
             accept: stored
                 .mesh_accept
                 .first()
@@ -182,9 +200,13 @@ impl App {
             links_key: String::new(),
             dirty: Vec::new(),
             questions_line: agents::questions(&home),
+            asks: agents::asks(&home),
             mesh_health: stored.mesh_health,
             confirm: String::new(),
             image_overlay: String::new(),
+            repos: Vec::new(),
+            vim_path: None,
+            pane_key: String::new(),
         };
         app.refresh_mesh();
         app
@@ -197,6 +219,27 @@ impl App {
         } else {
             level.label().into()
         }
+    }
+
+    pub fn composer_status(&self) -> (AgentKind, String) {
+        let agent = self.selected_agent().unwrap_or(AgentKind::Grok);
+        let live = agents::face(&self.home, &self.dir, agent, self.permit);
+        let model = if live.model != "—" {
+            live.model
+        } else if !self.model.is_empty() {
+            self.model.clone()
+        } else {
+            "—".into()
+        };
+        (
+            agent,
+            format!(
+                "{model} ({}) · {} · {}",
+                live.effort,
+                live.permission,
+                self.accept_label()
+            ),
+        )
     }
 
     pub fn fill_bar(&self) -> String {
@@ -223,9 +266,12 @@ impl App {
     }
 
     pub fn suggestions(&self) -> Vec<String> {
+        if !self.mode_is_desk() && !self.fill {
+            return Vec::new();
+        }
         let token = self.cmd.split_whitespace().next().unwrap_or("");
         if token.is_empty() {
-            return Vec::new();
+            return self.section_verbs();
         }
         let mut found = Vec::new();
         for (name, _) in COMMANDS {
@@ -251,10 +297,61 @@ impl App {
         found
     }
 
+    pub fn prompt_hint(&self) -> &'static str {
+        if !self.mode_is_desk() {
+            return "esc";
+        }
+        match self.section {
+            Section::Chats => "open",
+            Section::Tasks => "task",
+            Section::Mesh => "health",
+            Section::Files => "edit",
+            Section::Browser => "browse",
+            Section::Lessons => "open",
+        }
+    }
+
+    pub fn section_title(&self) -> String {
+        match self.section {
+            Section::Chats => format!("Chats  {}", self.chats.len()),
+            Section::Files => format!("Files  {}", self.repo_name()),
+            Section::Tasks => format!("Tasks  {}", self.repo_name()),
+            other => other.label().to_string(),
+        }
+    }
+
     pub fn description_line(&self) -> String {
+        if !self.note.is_empty() {
+            return self.note.clone();
+        }
+        if self.vim_active() {
+            return "vim on in this split".into();
+        }
+        if self.fill && self.transcript_lines().is_some() {
+            return "Wheel and arrows scroll this chat. Esc closes.".into();
+        }
+        if self.pane().is_some() {
+            return "Wheel scrolls this chat. Arrows open the next one. Esc closes. F3 fills."
+                .into();
+        }
         let head = self.cmd.split_whitespace().next().unwrap_or("");
         if head.is_empty() {
-            return "Description appears here. desc opens it.".into();
+            return match self.section {
+                Section::Chats => {
+                    "Grouped by agent, then mesh. Inside a mesh, newest first. Enter opens the chat."
+                        .into()
+                }
+                Section::Tasks => {
+                    "Each agent, then that mesh. Queue tasks sit under the agent. Newest first."
+                        .into()
+                }
+                Section::Mesh => {
+                    "Enter opens a skill. health and history stay on this repo.".into()
+                }
+                Section::Files => "Enter opens the file. F4 edits it in this split.".into(),
+                Section::Browser => "Enter opens the page. browse loads a file or a url.".into(),
+                Section::Lessons => "Enter opens the lesson.".into(),
+            };
         }
         if let Some((_, text)) = COMMANDS.iter().find(|(name, _)| *name == head) {
             return (*text).to_string();
@@ -280,6 +377,45 @@ impl App {
         }
     }
 
+    pub fn pane(&self) -> Option<&[String]> {
+        if self.fill || !matches!(self.section, Section::Chats | Section::Tasks) {
+            return None;
+        }
+        self.transcript_lines()
+    }
+
+    pub fn transcript_lines(&self) -> Option<&[String]> {
+        if !matches!(self.section, Section::Chats | Section::Tasks) {
+            return None;
+        }
+        match &self.mode {
+            Mode::Split { lines, .. } => Some(lines),
+            _ => None,
+        }
+    }
+
+    pub fn focus_index(&self) -> usize {
+        if !matches!(self.section, Section::Chats | Section::Tasks) {
+            return self.cursor;
+        }
+        let rows = self.section_rows();
+        if rows.is_empty() {
+            return 0;
+        }
+        focus_in(&rows, self.cursor)
+    }
+
+    pub fn rows_for(&self, width: usize) -> Vec<String> {
+        match self.section {
+            Section::Chats | Section::Tasks => self
+                .section_rows()
+                .iter()
+                .map(|row| self.row_line(row, width))
+                .collect(),
+            _ => self.list_lines(),
+        }
+    }
+
     pub fn lines(&self) -> Vec<String> {
         if let Mode::View { lines } = &self.mode {
             return paint_view(lines);
@@ -290,18 +426,19 @@ impl App {
         if self.desc_open {
             return vec![self.description_body()];
         }
+        if matches!(self.section, Section::Chats | Section::Tasks) {
+            self.rows_for(78)
+        } else {
+            self.list_lines()
+        }
+    }
+
+    fn list_lines(&self) -> Vec<String> {
         match self.section {
-            Section::Chats => self
-                .chats
-                .iter()
-                .map(|chat| {
-                    let mark = if chat.live { "* " } else { "" };
-                    format!("{:<7} {mark}{}", chat.agent.label(), chat.title)
-                })
-                .collect(),
-            Section::Tasks => self.task_lines(),
+            Section::Chats | Section::Tasks => self.rows_for(78),
             Section::Mesh => self.mesh_view.clone(),
-            Section::Files => files(&self.dir)
+            Section::Files => self
+                .file_rows()
                 .iter()
                 .map(|row| self.file_line(row))
                 .collect(),
@@ -321,13 +458,79 @@ impl App {
         }
     }
 
+    pub fn history_band(&self) -> Vec<String> {
+        if !self.mode_is_desk() || !matches!(self.section, Section::Chats | Section::Tasks) {
+            return Vec::new();
+        }
+        let Some(chat) = self.band_chat() else {
+            return vec!["History  none".into()];
+        };
+        let mut lines = vec![format!(
+            "History  {}  {}",
+            chat.agent.label(),
+            repo_label(&chat.cwd)
+        )];
+        let tail = chats::transcript(&chat.path);
+        let start = tail.len().saturating_sub(4);
+        for line in tail.into_iter().skip(start) {
+            lines.push(line.replace(['\n', '\r'], " "));
+        }
+        lines.truncate(5);
+        lines
+    }
+
+    pub fn side_lines(&self) -> Vec<String> {
+        if self.section != Section::Files || !self.mode_is_desk() {
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        for (name, path) in self.linked_paths() {
+            lines.push(clip_width(&format!("~ {name}"), 36));
+            for row in files(&path) {
+                if row.name == ".." {
+                    continue;
+                }
+                lines.push(clip_width(&format!("{} {}", row.icon, row.name), 36));
+            }
+        }
+        lines
+    }
+
+    pub fn ask_lines(&self) -> Vec<String> {
+        if self.fill || !matches!(self.section, Section::Chats | Section::Tasks) {
+            return Vec::new();
+        }
+        self.asks
+            .iter()
+            .take(3)
+            .map(|ask| {
+                format!(
+                    "needs you  {}  {}  {}",
+                    ask.agent.label(),
+                    repo_label(&ask.cwd),
+                    ask.label
+                )
+            })
+            .collect()
+    }
+
     pub fn on_key(&mut self, key: Key) -> Effect {
+        self.refresh_asks();
         self.note.clear();
+        if self.vim_active() {
+            return self.on_vim_key(key);
+        }
         match key {
             Key::Ignore => Effect::None,
             Key::CtrlC | Key::F(10) => Effect::Quit,
             Key::Esc => {
+                if self.fill {
+                    self.fill = false;
+                    return Effect::None;
+                }
+                self.vim_path = None;
                 self.mode = Mode::Desk;
+                self.pane_key.clear();
                 self.desc_open = false;
                 self.fill = false;
                 self.cmd.clear();
@@ -366,26 +569,34 @@ impl App {
                 Effect::None
             }
             Key::Up => {
-                self.nudge(-1);
+                if self.fill && self.transcript_lines().is_some() {
+                    self.scroll_transcript(-1);
+                } else {
+                    self.nudge(-1);
+                }
                 Effect::None
             }
             Key::Down => {
-                self.nudge(1);
+                if self.fill && self.transcript_lines().is_some() {
+                    self.scroll_transcript(1);
+                } else {
+                    self.nudge(1);
+                }
                 Effect::None
             }
-            Key::Wheel(delta) => {
-                self.nudge(i32::from(delta));
+            Key::Wheel(delta) | Key::Page(delta) => {
+                if self.transcript_lines().is_some() {
+                    self.scroll_transcript(i32::from(delta));
+                } else {
+                    self.nudge(i32::from(delta));
+                }
                 Effect::None
             }
             Key::Left | Key::Right if self.cmd.is_empty() => {
                 self.step_tab(if matches!(key, Key::Right) { 1 } else { -1 });
                 Effect::None
             }
-            Key::F(2) => {
-                self.vim = !self.vim;
-                Effect::None
-            }
-            Key::F(4) => self.edit_selected(),
+            Key::F(2) | Key::F(4) => self.edit_selected(),
             Key::Enter => self.activate(),
             Key::Backspace => {
                 self.confirm.clear();
@@ -393,7 +604,6 @@ impl App {
                 self.suggest = 0;
                 Effect::None
             }
-            Key::Char(_) if self.fill => Effect::None,
             Key::Char(ch) => {
                 self.confirm.clear();
                 self.cmd.push(ch);
@@ -404,8 +614,10 @@ impl App {
         }
     }
 
-    pub fn on_spot(&mut self, spot: crate::ui::Spot) -> Effect {
+    pub fn press(&mut self, spot: crate::ui::Spot, times: u8) -> Effect {
+        self.refresh_asks();
         match spot {
+            crate::ui::Spot::Ask(index) => self.open_ask(index),
             crate::ui::Spot::Tab(section) => {
                 self.enter(section);
                 Effect::None
@@ -416,43 +628,95 @@ impl App {
             }
             crate::ui::Spot::Cmd => Effect::None,
             crate::ui::Spot::Row(index) => {
+                let index = if matches!(self.section, Section::Chats | Section::Tasks) {
+                    let rows = self.section_rows();
+                    if rows.is_empty() {
+                        index
+                    } else {
+                        focus_in(&rows, index)
+                    }
+                } else {
+                    index
+                };
                 if !self.mode_is_desk() {
                     return Effect::None;
                 }
-                if self.cursor == index {
-                    self.activate()
+                let same = self.cursor == index;
+                self.cursor = index;
+                if self.pane().is_some() || same || times >= 2 {
+                    self.open_selected()
                 } else {
-                    self.cursor = index;
                     Effect::None
                 }
             }
         }
     }
 
-    pub fn reload(&mut self) {
-        self.chats = chats::load(&self.home);
-        self.usage_line = usage::line(&self.home);
-        self.questions_line = agents::questions(&self.home);
-        self.links_key.clear();
-        self.refresh_mesh();
+    pub fn apply_keys(
+        &mut self,
+        keys: &[crate::term::Key],
+        mut spot_at: impl FnMut(usize, usize) -> Option<crate::ui::Spot>,
+    ) -> Effect {
+        use crate::term::Key;
+        let mut quit = false;
+        let mut index = 0;
+        while index < keys.len() {
+            if let Key::Click { x, y } = &keys[index] {
+                let (x, y) = (*x, *y);
+                let mut times = 1u8;
+                let mut next = index + 1;
+                while next < keys.len() {
+                    match &keys[next] {
+                        Key::Ignore => next += 1,
+                        Key::Click { x: nx, y: ny } if *nx == x && *ny == y => {
+                            times = times.saturating_add(1);
+                            next += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                index = next;
+                if x > 0
+                    && y > 0
+                    && let Some(spot) = spot_at(x - 1, y - 1)
+                    && self.press(spot, times) == Effect::Quit
+                {
+                    quit = true;
+                }
+                continue;
+            }
+            let key = keys[index].clone();
+            index += 1;
+            if key != Key::Ignore && self.on_key(key) == Effect::Quit {
+                quit = true;
+            }
+        }
+        if quit { Effect::Quit } else { Effect::None }
     }
 
     fn enter(&mut self, section: Section) {
         self.section = section;
         self.cursor = 0;
         self.scroll = 0;
+        self.vim_path = None;
+        self.pane_key.clear();
         self.mode = Mode::Desk;
         self.fill = false;
         if section == Section::Tasks {
             self.usage_line = usage::line(&self.home);
             self.questions_line = agents::questions(&self.home);
         }
+        if section == Section::Files {
+            self.dir = self.repo_root();
+        }
+        if section == Section::Browser {
+            self.ensure_page();
+        }
     }
 
     fn shown_accept(&self) -> AcceptLevel {
-        if self.section == Section::Chats
-            && let Some(chat) = self.chats.get(self.cursor)
-            && let Some((_, level)) = self.chat_accept.iter().find(|(id, _)| id == &chat.id)
+        if let Some(id) = self.selected_chat_id()
+            && let Some((_, level)) = self.chat_accept.iter().find(|(chat, _)| chat == &id)
         {
             return *level;
         }
@@ -506,35 +770,16 @@ impl App {
         true
     }
 
-    fn task_lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("Usage  {}", self.usage_line),
-            format!("Questions  {}", self.questions_line),
-            format!("permit {}  effort {}", self.permit.label(), self.effort),
-            "A task has one owner.".into(),
-        ];
-        for (index, task) in self.tasks.iter().enumerate() {
-            lines.push(format!(
-                "{index}  {}  {}  {}  {}",
-                task.owner.label(),
-                task.model,
-                task.effort,
-                task.title
-            ));
-        }
-        if self.tasks.is_empty() {
-            lines.push("No tasks.".into());
-        }
-        lines
-    }
-
     fn file_line(&self, row: &FileRow) -> String {
         let ink = health::ink_code(&row.name);
         let changed = mesh::git_root(&self.dir)
             .and_then(|root| health::rel(&root, &row.path))
             .is_some_and(|rel| self.dirty.iter().any(|item| item == &rel));
         let mark = if changed { '*' } else { ' ' };
-        format!("{mark}{} \x1b[38;5;{ink}m{}\x1b[0m", row.icon, row.name)
+        format!(
+            "{mark}{} \x1b[38;5;{ink}m{}\x1b[0;48;5;0m",
+            row.icon, row.name
+        )
     }
 
     fn refresh_mesh(&mut self) {
@@ -570,6 +815,7 @@ impl App {
                 break;
             }
         }
+        self.repos = set.clone();
         self.ensure_links(&set);
         if !self.link_note.is_empty() {
             lines.push(format!("Linked repos  {}", self.link_note));
@@ -596,10 +842,24 @@ impl App {
         if self.skills.is_empty() {
             lines.push("Skills  none".into());
         } else {
-            let claude = self.skills.iter().filter(|skill| skill.agent == "claude").count();
-            let codex = self.skills.iter().filter(|skill| skill.agent == "codex").count();
-            let shared = self.skills.iter().filter(|skill| skill.agent == "shared").count();
-            lines.push(format!("Skills  claude {claude}  codex {codex}  shared {shared}"));
+            let claude = self
+                .skills
+                .iter()
+                .filter(|skill| skill.agent == "claude")
+                .count();
+            let codex = self
+                .skills
+                .iter()
+                .filter(|skill| skill.agent == "codex")
+                .count();
+            let shared = self
+                .skills
+                .iter()
+                .filter(|skill| skill.agent == "shared")
+                .count();
+            lines.push(format!(
+                "Skills  claude {claude}  codex {codex}  shared {shared}"
+            ));
             for skill in self.skills.iter().take(8) {
                 lines.push(format!("  {}  {}", skill.agent, skill.name));
             }
@@ -652,11 +912,30 @@ impl App {
         }
     }
 
+    fn scroll_transcript(&mut self, delta: i32) {
+        let step = if delta.abs() > 1 { 1 } else { 3 };
+        let jump = step * delta.unsigned_abs() as usize;
+        if delta < 0 {
+            self.pane_from_end = self.pane_from_end.saturating_add(jump);
+        } else {
+            self.pane_from_end = self.pane_from_end.saturating_sub(jump);
+        }
+    }
+
     fn nudge(&mut self, delta: i32) {
-        let suggestions = self.suggestions();
-        if !suggestions.is_empty() {
-            let len = suggestions.len() as i32;
-            self.suggest = (self.suggest as i32 + delta).rem_euclid(len) as usize;
+        if self.cmd.split_whitespace().next().is_some() {
+            let suggestions = self.suggestions();
+            if !suggestions.is_empty() {
+                let len = suggestions.len();
+                self.suggest = clamp_index(self.suggest, delta, len);
+                return;
+            }
+        }
+        if self.pane().is_some() {
+            if matches!(self.section, Section::Chats | Section::Tasks) {
+                self.step_list(delta);
+                self.follow_pane();
+            }
             return;
         }
         if !self.mode_is_desk() {
@@ -668,11 +947,15 @@ impl App {
             }
             return;
         }
-        let len = self.lines().len() as i32;
+        if matches!(self.section, Section::Chats | Section::Tasks) {
+            self.step_list(delta);
+            return;
+        }
+        let len = self.lines().len();
         if len == 0 {
             return;
         }
-        self.cursor = (self.cursor as i32 + delta).rem_euclid(len) as usize;
+        self.cursor = clamp_index(self.cursor, delta, len);
     }
 
     fn step_tab(&mut self, delta: i32) {
@@ -685,8 +968,13 @@ impl App {
     }
 
     fn toggle_fill(&mut self) {
-        if !matches!(self.mode, Mode::Desk) {
-            self.fill = !self.fill;
+        if matches!(self.mode, Mode::Desk) {
+            return;
+        }
+        self.fill = !self.fill;
+        if self.fill && !self.pane_key.is_empty() {
+            self.scroll = usize::MAX;
+        } else if self.fill {
             self.scroll = 0;
         }
     }
@@ -702,6 +990,10 @@ impl App {
             }
             return Effect::None;
         }
+        self.open_selected()
+    }
+
+    fn open_selected(&mut self) -> Effect {
         match self.section {
             Section::Files => self.open_file(false),
             Section::Chats => self.open_chat(false),
@@ -805,11 +1097,19 @@ impl App {
             self.note = "task needs a title".into();
             return;
         }
-        let owner = self
-            .chats
-            .get(self.cursor)
-            .map(|chat| chat.agent)
-            .unwrap_or(AgentKind::Grok);
+        let owner = match self.row_at(self.cursor) {
+            Some(DeskRow::Chat(index)) => self
+                .chats
+                .get(index)
+                .map(|chat| chat.agent)
+                .unwrap_or(AgentKind::Grok),
+            Some(DeskRow::Task(index)) => self
+                .tasks
+                .get(index)
+                .map(|task| task.owner)
+                .unwrap_or(AgentKind::Grok),
+            _ => AgentKind::Grok,
+        };
         self.tasks.push(Task {
             title: title.into(),
             owner,
@@ -827,7 +1127,11 @@ impl App {
             self.note = "move grok, claude, or codex".into();
             return;
         };
-        let Some(chat) = self.chats.get(self.cursor).cloned() else {
+        let Some(DeskRow::Chat(index)) = self.row_at(self.cursor) else {
+            self.note = "No chat.".into();
+            return;
+        };
+        let Some(chat) = self.chats.get(index).cloned() else {
             self.note = "No chat.".into();
             return;
         };
@@ -859,9 +1163,7 @@ impl App {
         } else {
             self.mesh_accept.push((key, level));
         }
-        if self.section == Section::Chats
-            && let Some(id) = self.chats.get(self.cursor).map(|chat| chat.id.clone())
-        {
+        if let Some(id) = self.selected_chat_id() {
             if let Some(slot) = self.chat_accept.iter_mut().find(|(chat, _)| chat == &id) {
                 slot.1 = level;
             } else {
@@ -880,9 +1182,8 @@ impl App {
             return;
         }
         self.model = name.into();
-        if self.section == Section::Tasks
-            && self.cursor >= 4
-            && let Some(task) = self.tasks.get_mut(self.cursor - 4)
+        if let Some(DeskRow::Task(index)) = self.row_at(self.cursor)
+            && let Some(task) = self.tasks.get_mut(index)
         {
             task.model = self.model.clone();
         }
@@ -907,10 +1208,11 @@ impl App {
     }
 
     fn selected_agent(&self) -> Option<AgentKind> {
-        if self.section == Section::Tasks && self.cursor >= 4 {
-            return self.tasks.get(self.cursor - 4).map(|task| task.owner);
+        match self.row_at(self.cursor) {
+            Some(DeskRow::Task(index)) => self.tasks.get(index).map(|task| task.owner),
+            Some(DeskRow::Chat(index)) => self.chats.get(index).map(|chat| chat.agent),
+            _ => None,
         }
-        self.chats.get(self.cursor).map(|chat| chat.agent)
     }
 
     fn health_cmd(&mut self, name: &str) {
@@ -924,7 +1226,11 @@ impl App {
                 return;
             }
         }
-        if let Some(slot) = self.mesh_health.iter_mut().find(|(path, _, _)| path == &key) {
+        if let Some(slot) = self
+            .mesh_health
+            .iter_mut()
+            .find(|(path, _, _)| path == &key)
+        {
             slot.1 = roads;
             slot.2 = externals;
         } else {
@@ -997,7 +1303,11 @@ impl App {
             self.note = "Repo  none".into();
             return;
         };
-        match Command::new("git").args(["push"]).current_dir(&root).output() {
+        match Command::new("git")
+            .args(["push"])
+            .current_dir(&root)
+            .output()
+        {
             Ok(output) => {
                 let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
                 let err = String::from_utf8_lossy(&output.stderr);
@@ -1065,6 +1375,8 @@ impl App {
         if target.is_empty() {
             self.section = Section::Browser;
             self.mode = Mode::Desk;
+            self.cursor = 0;
+            self.ensure_page();
             return;
         }
         match page::load(target, &self.dir) {
@@ -1108,11 +1420,9 @@ impl App {
         };
         match gitread::blob_text(&root, "HEAD", path, 64 * 1024) {
             Ok(text) => {
-                let mut lines = vec![
-                    format!("where  {path}"),
-                    "what  blob at HEAD".into(),
-                ];
+                let mut lines = vec![format!("where  {path}"), "what  blob at HEAD".into()];
                 lines.extend(text.lines().take(200).map(str::to_string));
+                self.vim_path = None;
                 self.mode = Mode::View { lines };
                 self.fill = false;
                 self.scroll = 0;
@@ -1122,37 +1432,126 @@ impl App {
     }
 
     fn open_chat(&mut self, context: bool) -> Effect {
-        let Some(chat) = self.chats.get(self.cursor).cloned() else {
+        let Some(DeskRow::Chat(index)) = self.row_at(self.cursor) else {
             self.note = "No chat.".into();
             return Effect::None;
         };
-        let body = if context {
-            let mut lines = vec!["Context".into()];
-            lines.extend(chats::transcript(&chat.path));
-            lines
-        } else {
-            vec!["Opened.".into()]
+        let Some(chat) = self.chats.get(index).cloned() else {
+            self.note = "No chat.".into();
+            return Effect::None;
         };
-        let lines = dress(chat.agent, &chat.title, body);
-        self.open_split(lines, Some(chat.agent));
-        self.section = Section::Chats;
+        self.show_chat(&chat, context);
         Effect::None
     }
 
-    fn open_task(&mut self) -> Effect {
-        if self.cursor < 4 {
-            return Effect::None;
+    fn follow_pane(&mut self) {
+        if self.pane().is_none() {
+            return;
         }
-        let Some(task) = self.tasks.get(self.cursor - 4).cloned() else {
+        match self.section {
+            Section::Chats => {
+                let _ = self.open_chat(false);
+            }
+            Section::Tasks => {
+                let _ = self.open_task();
+            }
+            _ => {}
+        }
+    }
+
+    fn refresh_asks(&mut self) {
+        self.asks = agents::asks(&self.home);
+        self.questions_line = agents::questions(&self.home);
+    }
+
+    fn needs_you(&self, chat: &crate::model::Chat) -> bool {
+        self.asks.iter().any(|ask| ask.session_id == chat.id)
+    }
+
+    fn push_chat_state(&self, body: &mut Vec<String>, chat: &crate::model::Chat) {
+        if let Some(context) = agents::context_line(&chat.path) {
+            body.push(context);
+        }
+        if let Some(ask) = self.asks.iter().find(|ask| ask.session_id == chat.id) {
+            body.push(format!("needs you  {}", ask.label));
+        }
+    }
+
+    fn open_ask(&mut self, index: usize) -> Effect {
+        let Some(ask) = self.asks.get(index).cloned() else {
             return Effect::None;
         };
-        let body = vec![
-            format!("owner  {}", task.owner.label()),
-            format!("model  {}", task.model),
-            format!("effort  {}", task.effort),
-            "Opened.".into(),
-        ];
-        self.open_split(dress(task.owner, &task.title, body), Some(task.owner));
+        let Some(position) = self.chats.iter().position(|chat| chat.id == ask.session_id) else {
+            self.note = "That chat is not in the list.".into();
+            return Effect::None;
+        };
+        self.section = Section::Chats;
+        let rows = self.section_rows();
+        if let Some(cursor) = rows
+            .iter()
+            .position(|row| matches!(row, DeskRow::Chat(slot) if *slot == position))
+        {
+            self.cursor = cursor;
+        }
+        let chat = self.chats[position].clone();
+        self.show_chat(&chat, false);
+        Effect::None
+    }
+
+    fn show_chat(&mut self, chat: &crate::model::Chat, context: bool) {
+        let key = format!("{}:{context}", chat.path.display());
+        if self.pane_key == key && self.pane().is_some() {
+            return;
+        }
+        let mut body = Vec::new();
+        if context {
+            body.push("Context".into());
+        }
+        body.push(format!("repo  {}", repo_label(&chat.cwd)));
+        self.push_chat_state(&mut body, chat);
+        body.extend(chats::transcript_full(&chat.path));
+        self.open_split(dress(chat.agent, &chat.title, body), Some(chat.agent));
+        self.pane_key = key;
+        self.scroll = usize::MAX;
+        self.pane_from_end = 0;
+        self.section = Section::Chats;
+    }
+
+    fn open_task(&mut self) -> Effect {
+        match self.row_at(self.cursor) {
+            Some(DeskRow::Chat(index)) => {
+                if let Some(chat) = self.chats.get(index).cloned() {
+                    self.show_chat(&chat, true);
+                }
+            }
+            Some(DeskRow::Task(index)) => {
+                let Some(task) = self.tasks.get(index).cloned() else {
+                    return Effect::None;
+                };
+                let place = self.place_label();
+                let key = format!("task:{index}:{}", task.title);
+                if self.pane_key == key && self.pane().is_some() {
+                    return Effect::None;
+                }
+                let mut body = vec![
+                    format!("owner  {}", task.owner.label()),
+                    format!("model  {}", task.model),
+                    format!("effort  {}", task.effort),
+                    format!("repo  {place}"),
+                ];
+                if let Some(chat) = self.chat_for_owner(task.owner) {
+                    self.push_chat_state(&mut body, &chat);
+                    body.extend(chats::transcript_full(&chat.path));
+                } else {
+                    body.push("No transcript.".into());
+                }
+                self.open_split(dress(task.owner, &task.title, body), Some(task.owner));
+                self.pane_key = key;
+                self.scroll = usize::MAX;
+                self.pane_from_end = 0;
+            }
+            _ => {}
+        }
         Effect::None
     }
 
@@ -1208,6 +1607,7 @@ impl App {
         let Some(lesson) = lessons::lessons().get(self.cursor) else {
             return Effect::None;
         };
+        self.vim_path = None;
         self.mode = Mode::View {
             lines: vec![lesson.title.into(), lesson.body.into()],
         };
@@ -1217,24 +1617,50 @@ impl App {
     }
 
     fn open_file(&mut self, edit: bool) -> Effect {
-        let rows = files(&self.dir);
+        let rows = self.file_rows();
         let Some(row) = rows.get(self.cursor) else {
             return Effect::None;
         };
+        if let Some(path) = self.linked_repo(&row.name) {
+            let mut lines = vec![format!("Repo  {}", path.display())];
+            for item in files(&path) {
+                if item.name == ".." {
+                    continue;
+                }
+                lines.push(format!("{} {}", item.icon, item.name));
+            }
+            self.open_split(lines, None);
+            return Effect::None;
+        }
         if row.dir {
+            let root = self.repo_root();
+            if row.name == ".." && !row.path.starts_with(&root) {
+                self.note = format!("Repo  {}", self.repo_name());
+                return Effect::None;
+            }
             self.dir = row.path.clone();
             self.cursor = 0;
             self.links_key.clear();
             self.refresh_mesh();
             return Effect::None;
         }
-        if edit {
-            return self.edit_path(row.path.clone());
-        }
         let text = std::fs::read_to_string(&row.path).unwrap_or_default();
+        if edit {
+            let name = row.name.trim_end_matches('/');
+            let mut lines = vec![format!("vim  {name}")];
+            lines.push(format!("where  {}", self.file_rel(&row.path)));
+            lines.extend(text.lines().take(200).map(str::to_string));
+            let body_at = lines.iter().take_while(|line| is_header(line)).count();
+            self.vim_path = Some(row.path.clone());
+            self.mode = Mode::View { lines };
+            self.fill = false;
+            self.scroll = body_at;
+            return Effect::None;
+        }
         let (changed, body) = self.marked_lines(&row.path, &text);
         let mut lines = self.file_header(&row.path, changed);
         lines.extend(body);
+        self.vim_path = None;
         self.mode = Mode::View { lines };
         self.fill = false;
         self.scroll = 0;
@@ -1291,37 +1717,25 @@ impl App {
     }
 
     fn edit_selected(&mut self) -> Effect {
-        if !self.vim {
-            self.note = "Vim is off.".into();
+        if self.section != Section::Files || !self.mode_is_desk() {
+            self.note = "Vim edits the file in its split.".into();
             return Effect::None;
         }
-        let rows = files(&self.dir);
+        let rows = self.file_rows();
         let Some(row) = rows.get(self.cursor) else {
             self.note = "No file.".into();
             return Effect::None;
         };
-        if row.dir {
+        if row.dir || self.linked_repo(&row.name).is_some() {
             self.note = "Not a file.".into();
             return Effect::None;
         }
-        if self.blocked(&format!("edit {}", row.path.display())) {
-            return Effect::None;
-        }
-        self.edit_path(row.path.clone())
-    }
-
-    fn edit_path(&mut self, path: PathBuf) -> Effect {
-        if self.vim {
-            self.record(&format!("edit {}", path.display()));
-            self.persist();
-            Effect::Edit(path)
-        } else {
-            self.note = "Vim is off.".into();
-            Effect::None
-        }
+        self.open_file(true)
     }
 
     fn open_split(&mut self, lines: Vec<String>, agent: Option<AgentKind>) {
+        self.vim_path = None;
+        self.pane_key.clear();
         self.mode = Mode::Split { lines, agent };
         self.fill = false;
         self.scroll = 0;
@@ -1339,6 +1753,423 @@ impl App {
             format!("{:02}:{:02} {text}", day / 3600, (day % 3600) / 60),
         );
         self.actions.truncate(40);
+    }
+
+    fn ensure_page(&mut self) {
+        if !self.page.is_empty() {
+            return;
+        }
+        let root = self.repo_root();
+        for name in ["README.md", "README", "readme.md", "Readme.md"] {
+            let path = root.join(name);
+            if !path.is_file() {
+                continue;
+            }
+            match page::load(&path.display().to_string(), &root) {
+                Ok(lines) => self.page = lines,
+                Err(err) => self.page = vec![err],
+            }
+            return;
+        }
+        self.page = vec![format!("Repo  {}", root.display()), "No README.".into()];
+    }
+
+    fn file_rows(&self) -> Vec<crate::model::FileRow> {
+        files(&self.dir)
+    }
+
+    fn linked_paths(&self) -> Vec<(String, PathBuf)> {
+        let root = self.repo_root();
+        let mut out = Vec::new();
+        for line in &self.links {
+            for name in line.split(" ~ ") {
+                let Some((_, path)) = self.repos.iter().find(|(repo, _)| repo == name) else {
+                    continue;
+                };
+                if path != &root && !out.iter().any(|(_, have)| have == path) {
+                    out.push((name.to_string(), path.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    fn linked_repo(&self, name: &str) -> Option<PathBuf> {
+        let rest = name.strip_prefix("~ ")?;
+        self.linked_paths()
+            .into_iter()
+            .find(|(repo, _)| repo == rest)
+            .map(|(_, path)| path)
+    }
+
+    fn repo_root(&self) -> PathBuf {
+        mesh::git_root(&self.dir).unwrap_or_else(|| self.dir.clone())
+    }
+
+    fn repo_name(&self) -> String {
+        let root = self.repo_root();
+        root.file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+            .map(str::to_string)
+            .unwrap_or_else(|| "this repo".into())
+    }
+
+    fn place_label(&self) -> String {
+        if let Some(link) = self.links.first() {
+            let trimmed = link.trim();
+            if !trimmed.is_empty() {
+                return clip_width(trimmed, 36);
+            }
+        }
+        self.repo_name()
+    }
+
+    fn file_rel(&self, path: &Path) -> String {
+        mesh::git_root(&self.dir)
+            .and_then(|root| health::rel(&root, path))
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string()
+            })
+    }
+
+    fn vim_active(&self) -> bool {
+        self.vim_path.is_some() && matches!(self.mode, Mode::View { .. })
+    }
+
+    fn on_vim_key(&mut self, key: Key) -> Effect {
+        match key {
+            Key::CtrlC | Key::F(10) => Effect::Quit,
+            Key::Esc => {
+                self.vim_path = None;
+                self.mode = Mode::Desk;
+                self.desc_open = false;
+                self.fill = false;
+                self.cmd.clear();
+                self.scroll = 0;
+                Effect::None
+            }
+            Key::Up => {
+                self.nudge(-1);
+                Effect::None
+            }
+            Key::Down => {
+                self.nudge(1);
+                Effect::None
+            }
+            Key::Wheel(delta) => {
+                self.nudge(i32::from(delta));
+                Effect::None
+            }
+            Key::Backspace => {
+                self.confirm.clear();
+                self.vim_backspace();
+                Effect::None
+            }
+            Key::Char(ch) if !self.fill => {
+                self.confirm.clear();
+                self.vim_type(ch);
+                Effect::None
+            }
+            Key::Enter => {
+                self.confirm.clear();
+                self.vim_break();
+                Effect::None
+            }
+            Key::F(2) | Key::F(4) => self.write_vim(),
+            _ => Effect::None,
+        }
+    }
+
+    fn vim_type(&mut self, ch: char) {
+        let header = self.vim_header_len();
+        if self.scroll < header {
+            self.scroll = header;
+        }
+        let Mode::View { lines } = &mut self.mode else {
+            return;
+        };
+        if self.scroll >= lines.len() {
+            lines.push(String::new());
+            self.scroll = lines.len() - 1;
+        }
+        if let Some(line) = lines.get_mut(self.scroll) {
+            line.push(ch);
+        }
+    }
+
+    fn vim_backspace(&mut self) {
+        let header = self.vim_header_len();
+        if self.scroll < header {
+            return;
+        }
+        let Mode::View { lines } = &mut self.mode else {
+            return;
+        };
+        if let Some(line) = lines.get_mut(self.scroll) {
+            line.pop();
+        }
+    }
+
+    fn vim_break(&mut self) {
+        let header = self.vim_header_len();
+        if self.scroll < header {
+            self.scroll = header;
+        }
+        let Mode::View { lines } = &mut self.mode else {
+            return;
+        };
+        let at = self.scroll.min(lines.len());
+        if at >= lines.len() {
+            lines.push(String::new());
+        } else {
+            lines.insert(at + 1, String::new());
+        }
+        self.scroll = at + 1;
+    }
+
+    fn vim_header_len(&self) -> usize {
+        let Mode::View { lines } = &self.mode else {
+            return 0;
+        };
+        lines.iter().take_while(|line| is_header(line)).count()
+    }
+
+    fn write_vim(&mut self) -> Effect {
+        let Some(path) = self.vim_path.clone() else {
+            return Effect::None;
+        };
+        let key = format!("write {}", path.display());
+        if self.hold(&key, self.allows()) {
+            return Effect::None;
+        }
+        let body = match &self.mode {
+            Mode::View { lines } => vim_body(lines),
+            _ => return Effect::None,
+        };
+        match std::fs::write(&path, body) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file");
+                self.note = format!("wrote {name}");
+            }
+            Err(err) => self.note = format!("write {err}"),
+        }
+        Effect::None
+    }
+
+    fn section_verbs(&self) -> Vec<String> {
+        let verbs: &[&str] = match self.section {
+            Section::Chats => &["open", "context", "move", "task"],
+            Section::Tasks => &["task", "permit", "model", "effort"],
+            Section::Mesh => &["health", "skill", "history", "blob"],
+            Section::Files => &["commit", "push", "blob", "history"],
+            Section::Browser => &["browse", "image"],
+            Section::Lessons => &["lessons"],
+        };
+        verbs.iter().map(|verb| (*verb).to_string()).collect()
+    }
+
+    fn row_at(&self, cursor: usize) -> Option<DeskRow> {
+        let rows = self.section_rows();
+        if rows.is_empty() {
+            return None;
+        }
+        match rows.get(focus_in(&rows, cursor))? {
+            DeskRow::Chat(index) => Some(DeskRow::Chat(*index)),
+            DeskRow::Task(index) => Some(DeskRow::Task(*index)),
+            DeskRow::Agent(_) | DeskRow::Mesh(_) => None,
+        }
+    }
+
+    fn selected_chat_id(&self) -> Option<String> {
+        if self.section != Section::Chats {
+            return None;
+        }
+        match self.row_at(self.cursor) {
+            Some(DeskRow::Chat(index)) => self.chats.get(index).map(|chat| chat.id.clone()),
+            _ => None,
+        }
+    }
+
+    fn band_chat(&self) -> Option<crate::model::Chat> {
+        match self.row_at(self.cursor)? {
+            DeskRow::Chat(index) => self.chats.get(index).cloned(),
+            DeskRow::Task(index) => {
+                let owner = self.tasks.get(index)?.owner;
+                self.chat_for_owner(owner)
+            }
+            DeskRow::Agent(_) | DeskRow::Mesh(_) => None,
+        }
+    }
+
+    fn chat_for_owner(&self, owner: AgentKind) -> Option<crate::model::Chat> {
+        self.chat_order()
+            .into_iter()
+            .find(|index| self.chats[*index].agent == owner)
+            .map(|index| self.chats[index].clone())
+    }
+
+    fn section_rows(&self) -> Vec<DeskRow> {
+        match self.section {
+            Section::Chats => self.grouped(false),
+            Section::Tasks => self.grouped(true),
+            _ => Vec::new(),
+        }
+    }
+
+    fn step_list(&mut self, delta: i32) {
+        let rows = self.section_rows();
+        let len = rows.len();
+        if len == 0 {
+            return;
+        }
+        let current = focus_in(&rows, self.cursor);
+        let mut next = clamp_index(current, delta, len);
+        let step = if delta < 0 { -1 } else { 1 };
+        while next < len && !row_is_item(&rows[next]) {
+            let candidate = next as i32 + step;
+            if candidate < 0 || candidate >= len as i32 {
+                return;
+            }
+            next = candidate as usize;
+        }
+        if row_is_item(&rows[next]) {
+            self.cursor = next;
+        }
+    }
+
+    fn row_line(&self, row: &DeskRow, width: usize) -> String {
+        match row {
+            DeskRow::Agent(agent) => agent_ink(*agent),
+            DeskRow::Mesh(label) => format!("\x1b[38;5;131m  {label}"),
+            DeskRow::Chat(index) => chat_line(
+                &self.chats[*index],
+                width,
+                self.needs_you(&self.chats[*index]),
+            ),
+            DeskRow::Task(index) => self.task_line(&self.tasks[*index], width),
+        }
+    }
+
+    fn grouped(&self, with_tasks: bool) -> Vec<DeskRow> {
+        let root = self.repo_root();
+        let repos = self.repos.clone();
+        let links = self.links.clone();
+        let order = self.chat_order();
+        let mut rows = Vec::new();
+        let mut seen = [false; 3];
+        let mut current: Option<AgentKind> = None;
+        let mut last_mesh: Option<String> = None;
+        for index in &order {
+            let chat = &self.chats[*index];
+            if current != Some(chat.agent) {
+                self.emit_task_agents(&mut rows, &mut seen, agent_rank(chat.agent), with_tasks);
+                rows.push(DeskRow::Agent(chat.agent));
+                seen[agent_rank(chat.agent) as usize] = true;
+                if with_tasks {
+                    self.push_tasks(&mut rows, chat.agent);
+                }
+                last_mesh = None;
+                current = Some(chat.agent);
+            }
+            let label = mesh_group(&chat.cwd, &root, &repos, &links).1;
+            if last_mesh.as_deref() != Some(label.as_str()) {
+                rows.push(DeskRow::Mesh(label.clone()));
+                last_mesh = Some(label);
+            }
+            rows.push(DeskRow::Chat(*index));
+        }
+        if with_tasks {
+            self.emit_task_agents(&mut rows, &mut seen, 3, true);
+        }
+        rows
+    }
+
+    fn emit_task_agents(
+        &self,
+        rows: &mut Vec<DeskRow>,
+        seen: &mut [bool; 3],
+        before: u8,
+        with_tasks: bool,
+    ) {
+        if !with_tasks {
+            return;
+        }
+        for agent in [AgentKind::Grok, AgentKind::Claude, AgentKind::Codex] {
+            let rank = agent_rank(agent);
+            if rank >= before || seen[rank as usize] {
+                continue;
+            }
+            if self.tasks.iter().any(|task| task.owner == agent) {
+                rows.push(DeskRow::Agent(agent));
+                self.push_tasks(rows, agent);
+                seen[rank as usize] = true;
+            }
+        }
+    }
+
+    fn push_tasks(&self, rows: &mut Vec<DeskRow>, agent: AgentKind) {
+        for (index, task) in self.tasks.iter().enumerate() {
+            if task.owner == agent {
+                rows.push(DeskRow::Task(index));
+            }
+        }
+    }
+
+    fn task_line(&self, task: &Task, width: usize) -> String {
+        format!(
+            "{}  {}  {}  {}",
+            fit("—", 11),
+            fit(&task.title, row_title_width(width)),
+            fit(&self.place_label(), 14),
+            fit("—", 6),
+        )
+    }
+
+    fn chat_order(&self) -> Vec<usize> {
+        let root = self.repo_root();
+        let repos = self.repos.clone();
+        let links = self.links.clone();
+        let mut meta: Vec<(usize, u8, u8, String, i64)> = (0..self.chats.len())
+            .map(|index| {
+                let chat = &self.chats[index];
+                let (rank, key) = mesh_group(&chat.cwd, &root, &repos, &links);
+                (index, agent_rank(chat.agent), rank, key, date_key(chat.at))
+            })
+            .collect();
+        let mut group_best: Vec<(u8, u8, String, i64)> = Vec::new();
+        for (_, agent, rank, key, date) in &meta {
+            if let Some(slot) = group_best
+                .iter_mut()
+                .find(|item| item.0 == *agent && item.1 == *rank && item.2 == *key)
+            {
+                slot.3 = slot.3.max(*date);
+            } else {
+                group_best.push((*agent, *rank, key.clone(), *date));
+            }
+        }
+        let best = |agent: u8, rank: u8, key: &str| {
+            group_best
+                .iter()
+                .find(|item| item.0 == agent && item.1 == rank && item.2 == key)
+                .map(|item| item.3)
+                .unwrap_or(i64::MIN)
+        };
+        meta.sort_by(|left, right| {
+            left.1.cmp(&right.1).then(left.2.cmp(&right.2)).then(
+                best(right.1, right.2, &right.3)
+                    .cmp(&best(left.1, left.2, &left.3))
+                    .then(left.3.cmp(&right.3))
+                    .then(right.4.cmp(&left.4)),
+            )
+        });
+        meta.into_iter().map(|item| item.0).collect()
     }
 
     fn persist(&self) {
@@ -1362,6 +2193,263 @@ fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeskRow {
+    Agent(AgentKind),
+    Mesh(String),
+    Chat(usize),
+    Task(usize),
+}
+
+fn row_is_item(row: &DeskRow) -> bool {
+    matches!(row, DeskRow::Chat(_) | DeskRow::Task(_))
+}
+
+fn focus_in(rows: &[DeskRow], cursor: usize) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let cursor = cursor.min(rows.len() - 1);
+    if row_is_item(&rows[cursor]) {
+        return cursor;
+    }
+    if let Some(offset) = rows.iter().skip(cursor).position(row_is_item) {
+        return cursor + offset;
+    }
+    rows.iter()
+        .take(cursor)
+        .rposition(row_is_item)
+        .unwrap_or(cursor)
+}
+
+fn row_title_width(width: usize) -> usize {
+    let fixed = 11 + 2 + 14 + 2 + 6;
+    width.saturating_sub(fixed).max(8)
+}
+
+fn chat_line(chat: &crate::model::Chat, width: usize, needs: bool) -> String {
+    let mut title = visible_title(chat);
+    if needs {
+        title = format!("! {title}");
+    }
+    if chat.live {
+        title = format!("* {title}");
+    }
+    format!(
+        "{}  {}  {}  {}",
+        fit(&stamp(chat.at), 11),
+        fit(&title, row_title_width(width)),
+        fit(&repo_label(&chat.cwd), 14),
+        fit(&token_label(chat.tokens), 6),
+    )
+}
+
+fn agent_rank(agent: AgentKind) -> u8 {
+    match agent {
+        AgentKind::Grok => 0,
+        AgentKind::Claude => 1,
+        AgentKind::Codex => 2,
+    }
+}
+
+fn agent_ink(agent: AgentKind) -> String {
+    let color = match agent {
+        AgentKind::Grok => "196",
+        AgentKind::Claude => "39",
+        AgentKind::Codex => "51",
+    };
+    format!("\x1b[38;5;{color}m{}", agent.label())
+}
+
+fn date_key(at: i64) -> i64 {
+    if at > 0 { at } else { i64::MIN }
+}
+
+fn stamp(at: i64) -> String {
+    if at <= 0 {
+        return "—".into();
+    }
+    let t = at as libc::time_t;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let ptr = unsafe { libc::localtime_r(&t, tm.as_mut_ptr()) };
+    if ptr.is_null() {
+        return "—".into();
+    }
+    let tm = unsafe { tm.assume_init() };
+    format!(
+        "{:02}-{:02} {:02}:{:02}",
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min
+    )
+}
+
+fn token_label(tokens: Option<u64>) -> String {
+    let Some(n) = tokens else {
+        return "—".into();
+    };
+    if n >= 1_000_000 {
+        return compact(n, 1_000_000, 'm');
+    }
+    if n >= 1000 {
+        return compact(n, 1000, 'k');
+    }
+    n.to_string()
+}
+
+fn compact(n: u64, unit: u64, suffix: char) -> String {
+    let tenths = n / (unit / 10);
+    let whole = tenths / 10;
+    let frac = tenths % 10;
+    if frac == 0 {
+        format!("{whole}{suffix}")
+    } else {
+        format!("{whole}.{frac}{suffix}")
+    }
+}
+
+fn visible_title(chat: &crate::model::Chat) -> String {
+    let title = chat.title.trim();
+    if title.is_empty() || title == chat.id || is_uuid(title) {
+        let repo = repo_label(&chat.cwd);
+        if repo != "—" {
+            return repo;
+        }
+    }
+    chat.title.clone()
+}
+
+fn is_uuid(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 32
+        && bytes.iter().filter(|byte| **byte == b'-').count() >= 4
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() || *byte == b'-')
+}
+
+fn is_header(line: &str) -> bool {
+    line.starts_with("vim ")
+        || line.starts_with("where ")
+        || line.starts_with("when ")
+        || line.starts_with("what ")
+        || line.starts_with("changed ")
+}
+
+fn vim_body(lines: &[String]) -> String {
+    let mut out = String::new();
+    for line in lines.iter().skip_while(|line| is_header(line)) {
+        let raw = line.strip_prefix("* ").unwrap_or(line.as_str());
+        out.push_str(raw);
+        out.push('\n');
+    }
+    out
+}
+
+fn clamp_index(cursor: usize, delta: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let last = len as i32 - 1;
+    (cursor as i32 + delta).clamp(0, last) as usize
+}
+
+fn mesh_group(
+    cwd: &str,
+    root: &Path,
+    repos: &[(String, PathBuf)],
+    links: &[String],
+) -> (u8, String) {
+    let window = repos
+        .iter()
+        .find(|(_, path)| path == root)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| repo_label(&root.display().to_string()));
+    let window_line = links
+        .iter()
+        .find(|line| line.split(" ~ ").any(|name| name == window));
+    let in_window = in_repo(cwd, root)
+        || window_line.is_some_and(|line| line.split(" ~ ").any(|name| named_on(cwd, name, repos)));
+    if in_window {
+        return (0, window_line.cloned().unwrap_or(window));
+    }
+    if let Some(line) = links
+        .iter()
+        .find(|line| line.split(" ~ ").any(|name| named_on(cwd, name, repos)))
+    {
+        return (1, line.clone());
+    }
+    if let Some((name, _)) = repos.iter().find(|(_, path)| in_repo(cwd, path)) {
+        return (2, name.clone());
+    }
+    (2, repo_label(cwd))
+}
+
+fn named_on(cwd: &str, name: &str, repos: &[(String, PathBuf)]) -> bool {
+    repo_label(cwd) == name
+        || repos
+            .iter()
+            .any(|(repo, path)| repo == name && in_repo(cwd, path))
+}
+
+fn in_repo(cwd: &str, root: &Path) -> bool {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return false;
+    }
+    let path = Path::new(cwd);
+    if path == root || path.starts_with(root) {
+        return true;
+    }
+    let enc = root.to_string_lossy().replace('/', "-");
+    cwd == enc || cwd.starts_with(&format!("{enc}-"))
+}
+
+fn repo_label(cwd: &str) -> String {
+    let cwd = cwd.trim();
+    if cwd.is_empty() {
+        return "—".into();
+    }
+    if cwd.contains('/')
+        && let Some(name) = Path::new(cwd).file_name().and_then(|name| name.to_str())
+        && !name.is_empty()
+    {
+        return name.to_string();
+    }
+    if let Some((head, tail)) = cwd.rsplit_once("-dev-")
+        && !head.is_empty()
+        && !tail.is_empty()
+    {
+        return tail.to_string();
+    }
+    clip_width(cwd.trim_start_matches('-'), 22)
+}
+
+fn fit(text: &str, width: usize) -> String {
+    let mut out: String = text.chars().take(width).collect();
+    if text.chars().count() > width {
+        out.pop();
+        out.push('~');
+    }
+    while out.chars().count() < width {
+        out.push(' ');
+    }
+    out
+}
+
+fn clip_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut out: String = text.chars().take(width).collect();
+    if text.chars().count() > width {
+        out.pop();
+        out.push('~');
+    }
+    out
+}
+
 fn paint_view(lines: &[String]) -> Vec<String> {
     let ext = view_ext(lines);
     lines.iter().map(|line| paint_line(line, ext)).collect()
@@ -1380,11 +2468,7 @@ fn view_ext(lines: &[String]) -> &str {
 }
 
 fn paint_line(line: &str, ext: &str) -> String {
-    if line.starts_with("where ")
-        || line.starts_with("when ")
-        || line.starts_with("what ")
-        || line.starts_with("changed ")
-    {
+    if is_header(line) {
         line.to_string()
     } else {
         hl::paint_ext(line, ext)
@@ -1429,13 +2513,59 @@ fn push_second(found: &mut Vec<String>, head: &str, partial: &str) {
     }
 }
 
-pub fn edit(path: &Path, dir: &Path) {
-    let _ = Command::new("vim").arg(path).current_dir(dir).status();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chats_sit_on_black_and_the_selected_row_is_gold() {
+        let dir = std::env::temp_dir().join("granttap-ui-empty");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut app = App::new(dir, PathBuf::from("/nowhere-home"));
+        app.chats = vec![
+            crate::model::Chat {
+                agent: AgentKind::Codex,
+                id: "one".into(),
+                title: "Hold the line".into(),
+                path: PathBuf::new(),
+                cwd: String::new(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+            crate::model::Chat {
+                agent: AgentKind::Codex,
+                id: "two".into(),
+                title: "Ship the desk".into(),
+                path: PathBuf::new(),
+                cwd: String::new(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+        ];
+        app.cursor = app
+            .lines()
+            .iter()
+            .position(|line| line.contains("Ship the desk"))
+            .unwrap();
+        let screen = crate::ui::Screen::paint(&app, 80, 24);
+        assert!(screen.frame.contains("48;5;0"));
+        assert!(screen.frame.contains("38;5;220"));
+        assert!(screen.frame.contains("38;5;51"));
+        assert!(screen.frame.contains("Hold the line"));
+        assert!(screen.frame.contains("Ship the desk"));
+        assert!(screen.frame.contains("\u{1b}[1;24r"));
+        assert!(!screen.frame.contains('\u{2500}'));
+        assert!(!screen.frame.contains("Vim"));
+        let gold = screen.frame.split("38;5;220").nth(1).unwrap_or("");
+        assert!(gold.contains("Ship the desk"), "{gold}");
+        assert!(
+            app.lines()
+                .iter()
+                .any(|line| line.contains("\u{1b}[38;5;51mCodex"))
+        );
+    }
 
     #[test]
     fn suggestions_and_description_follow_the_command() {
@@ -1448,6 +2578,54 @@ mod tests {
     }
 
     #[test]
+    fn composer_shows_model_approval_and_a_suggestion_zone() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-face-{n}"));
+        let dir = std::env::temp_dir().join(format!("granttap-face-dir-{n}"));
+        std::fs::create_dir_all(home.join(".grok")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            home.join(".grok/config.toml"),
+            "[ui]\npermission_mode = \"always-approve\"\n\n[models]\ndefault = \"grok-4.7\"\ndefault_reasoning_effort = \"xhigh\"\n",
+        )
+        .unwrap();
+        let mut app = App::new(dir, home.clone());
+        app.chats.push(crate::model::Chat {
+            agent: AgentKind::Grok,
+            id: "s".into(),
+            title: "Ship the line".into(),
+            path: PathBuf::new(),
+            cwd: String::new(),
+            live: false,
+            at: 1,
+            tokens: None,
+        });
+        let key = app.mesh_key();
+        app.mesh_accept.push((key, AcceptLevel::Full));
+        let (agent, status) = app.composer_status();
+        assert_eq!(agent, AgentKind::Grok);
+        assert!(status.contains("grok-4.7"), "{status}");
+        assert!(status.contains("xhigh"), "{status}");
+        assert!(status.contains("always-approve"), "{status}");
+        assert!(status.contains("full"), "{status}");
+        let idle = crate::ui::Screen::paint(&app, 100, 24);
+        assert!(idle.frame.contains("grok-4.7"), "{}", idle.frame);
+        assert!(idle.frame.contains("always-approve"));
+        assert!(idle.frame.contains("full"));
+        assert!(idle.cursor.is_some());
+        assert!(!idle.frame.contains(" context"), "{}", idle.frame);
+        app.cmd = "mo".into();
+        let typing = crate::ui::Screen::paint(&app, 100, 24);
+        assert!(typing.frame.contains(" move"), "{}", typing.frame);
+        assert!(typing.frame.contains(" model"), "{}", typing.frame);
+        assert!(typing.cursor.is_some());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
     fn task_has_one_owner_and_move_changes_the_chat() {
         let mut app = App::new(PathBuf::from("."), PathBuf::from("/nowhere-home"));
         app.chats.push(crate::model::Chat {
@@ -1455,7 +2633,10 @@ mod tests {
             id: "abc".into(),
             title: "abc".into(),
             path: PathBuf::new(),
+            cwd: String::new(),
             live: false,
+            at: 0,
+            tokens: None,
         });
         app.cmd = "task write the desk".into();
         app.on_key(Key::Enter);
@@ -1485,13 +2666,29 @@ mod tests {
             id: "abc".into(),
             title: "abc".into(),
             path: PathBuf::new(),
+            cwd: String::new(),
             live: false,
+            at: 0,
+            tokens: None,
         });
         app.cursor = 0;
         app.cmd = "task write the desk".into();
         app.on_key(Key::Enter);
         assert_eq!(app.tasks[0].owner, AgentKind::Claude);
-        app.cursor = 4;
+        let lines = app.lines();
+        let header = lines
+            .iter()
+            .position(|line| line.ends_with("Claude"))
+            .unwrap();
+        app.cursor = lines
+            .iter()
+            .position(|line| line.contains("write the desk"))
+            .unwrap();
+        assert!(header < app.cursor, "{lines:?}");
+        let row = lines[app.cursor].clone();
+        assert!(!row.contains("Claude"), "{row}");
+        assert!(row.contains("granttap"), "{row}");
+        assert!(row.contains('—'), "{row}");
         app.cmd.clear();
         app.on_key(Key::Enter);
         let Mode::Split { lines, agent } = &app.mode else {
@@ -1515,12 +2712,570 @@ mod tests {
     }
 
     #[test]
-    fn vim_off_refuses_edit() {
-        let mut app = App::new(PathBuf::from("."), PathBuf::from("/nowhere-home"));
-        app.section = Section::Files;
+    fn edit_opens_the_file_in_its_split() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("granttap-edit-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("note.txt"), "keep the line\n").unwrap();
+        let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
+        app.cmd = "files".into();
+        app.on_key(Key::Enter);
+        app.cursor = app
+            .lines()
+            .iter()
+            .position(|line| line.contains("note.txt"))
+            .unwrap();
         let effect = app.on_key(Key::F(4));
         assert!(matches!(effect, Effect::None));
-        assert_eq!(app.note, "Vim is off.");
+        let joined = app.lines().join("\n");
+        assert!(joined.contains("vim  note.txt"), "{joined}");
+        assert!(joined.contains("keep the line"), "{joined}");
+        assert!(!joined.contains("Vim off"));
+        assert!(app.description_line().contains("vim on"));
+        app.on_key(Key::Char('!'));
+        app.on_key(Key::Up);
+        app.on_key(Key::Wheel(-1));
+        assert!(app.cmd.is_empty());
+        app.on_key(Key::F(4));
+        assert_eq!(app.note, "ask  repeat to run");
+        app.on_key(Key::F(4));
+        assert_eq!(app.note, "wrote note.txt");
+        let saved = std::fs::read_to_string(dir.join("note.txt")).unwrap();
+        assert!(saved.contains("keep the line!"), "{saved}");
+        app.on_key(Key::Esc);
+        assert!(app.mode_is_desk());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tasks_lead_with_each_agent_and_the_history_follows() {
+        let mut app = App::new(PathBuf::from("/tmp/night"), PathBuf::from("/nowhere-home"));
+        app.chats = vec![
+            crate::model::Chat {
+                agent: AgentKind::Codex,
+                id: "c1".into(),
+                title: "codex wall".into(),
+                path: PathBuf::new(),
+                cwd: "/tmp/other".into(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+            crate::model::Chat {
+                agent: AgentKind::Codex,
+                id: "c2".into(),
+                title: "codex two".into(),
+                path: PathBuf::new(),
+                cwd: "/tmp/other".into(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+            crate::model::Chat {
+                agent: AgentKind::Claude,
+                id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+                title: "01234567-89ab-cdef-0123-456789abcdef".into(),
+                path: PathBuf::new(),
+                cwd: "-Users-serhiirihgt-dev-granttap-mcp".into(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+            crate::model::Chat {
+                agent: AgentKind::Grok,
+                id: "g1".into(),
+                title: "desk towers".into(),
+                path: PathBuf::new(),
+                cwd: "/tmp/night".into(),
+                live: true,
+                at: 0,
+                tokens: None,
+            },
+        ];
+        app.section = Section::Chats;
+        let lines = app.lines();
+        let grok = lines
+            .iter()
+            .position(|line| line.ends_with("Grok"))
+            .unwrap();
+        let claude = lines
+            .iter()
+            .position(|line| line.ends_with("Claude"))
+            .unwrap();
+        let codex = lines
+            .iter()
+            .position(|line| line.ends_with("Codex"))
+            .unwrap();
+        assert!(grok < claude && claude < codex, "{lines:?}");
+        let towers = lines
+            .iter()
+            .find(|line| line.contains("desk towers"))
+            .unwrap();
+        assert!(!towers.ends_with("Grok"), "{towers}");
+        app.cursor = lines
+            .iter()
+            .position(|line| line.contains("granttap-mcp") && line.contains('—'))
+            .unwrap();
+        let band = app.history_band();
+        assert!(band[0].contains("Claude"), "{band:?}");
+        assert!(band[0].contains("granttap-mcp"), "{band:?}");
+        app.section = Section::Tasks;
+        app.cursor = 0;
+        let tasks = app.lines();
+        assert!(tasks[0].ends_with("Grok"), "{tasks:?}");
+        assert!(
+            tasks.iter().any(|line| line.ends_with("Claude")),
+            "{tasks:?}"
+        );
+    }
+
+    fn sample_chat(
+        agent: AgentKind,
+        title: &str,
+        cwd: &str,
+        at: i64,
+        tokens: Option<u64>,
+    ) -> crate::model::Chat {
+        crate::model::Chat {
+            agent,
+            id: format!("id-{title}"),
+            title: title.into(),
+            path: PathBuf::new(),
+            cwd: cwd.into(),
+            live: false,
+            at,
+            tokens,
+        }
+    }
+
+    #[test]
+    fn list_groups_agent_then_mesh_then_date() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("granttap-window-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mesh = std::env::temp_dir().join(format!("aaa-mesh-{n}"));
+        let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
+        app.repos = vec![
+            ("here".into(), dir.clone()),
+            ("mesh-b".into(), mesh.clone()),
+        ];
+        app.links = vec!["here ~ mesh-b".into()];
+        let here = dir.display().to_string();
+        let mesh = mesh.display().to_string();
+        app.chats = vec![
+            sample_chat(AgentKind::Codex, "codex-here", &here, 9_000, None),
+            sample_chat(AgentKind::Grok, "grok-far", "/tmp/far", 9_000, None),
+            sample_chat(AgentKind::Grok, "grok-mesh-old", &mesh, 1_000, None),
+            sample_chat(AgentKind::Grok, "grok-mesh-new", &mesh, 8_000, None),
+            sample_chat(AgentKind::Grok, "grok-here-old", &here, 2_000, None),
+            sample_chat(AgentKind::Grok, "grok-here-new", &here, 3_000, None),
+            sample_chat(AgentKind::Claude, "claude-z", "/tmp/zeta", 9_000, None),
+            sample_chat(AgentKind::Claude, "claude-a", "/tmp/alpha", 1_000, None),
+        ];
+        let lines = app.lines();
+        let at = |title: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("{title} missing in {lines:?}"))
+        };
+        assert!(lines[at("Grok")].ends_with("Grok"), "{lines:?}");
+        assert!(at("Grok") < at("grok-mesh-new"), "{lines:?}");
+        assert!(at("here ~ mesh-b") < at("grok-mesh-new"), "{lines:?}");
+        assert!(at("grok-mesh-new") < at("grok-here-new"), "{lines:?}");
+        assert!(at("grok-here-new") < at("grok-here-old"), "{lines:?}");
+        assert!(at("grok-here-old") < at("grok-mesh-old"), "{lines:?}");
+        assert!(at("grok-mesh-old") < at("grok-far"), "{lines:?}");
+        assert!(at("Claude") < at("claude-z"), "{lines:?}");
+        assert!(at("claude-z") < at("claude-a"), "{lines:?}");
+        assert!(at("Codex") < at("codex-here"), "{lines:?}");
+        let chat = lines
+            .iter()
+            .find(|line| line.contains("grok-here-new"))
+            .unwrap();
+        assert!(!chat.ends_with("Grok"), "{chat}");
+        app.tasks.push(Task {
+            title: "claude job".into(),
+            owner: AgentKind::Claude,
+            model: String::new(),
+            effort: String::new(),
+        });
+        app.tasks.push(Task {
+            title: "grok job".into(),
+            owner: AgentKind::Grok,
+            model: String::new(),
+            effort: String::new(),
+        });
+        app.section = Section::Tasks;
+        let tasks = app.lines();
+        let at = |title: &str| {
+            tasks
+                .iter()
+                .position(|line| line.contains(title))
+                .unwrap_or_else(|| panic!("{title} missing in {tasks:?}"))
+        };
+        assert!(tasks[at("grok job")].contains('—'), "{tasks:?}");
+        assert!(at("Grok") < at("grok job"), "{tasks:?}");
+        assert!(at("grok job") < at("grok-mesh-new"), "{tasks:?}");
+        assert!(at("claude job") < at("claude-a"), "{tasks:?}");
+    }
+
+    #[test]
+    fn row_shows_date_title_tokens_and_agent_color() {
+        let mut app = App::new(PathBuf::from("/tmp/night"), PathBuf::from("/nowhere-home"));
+        let id = "01234567-89ab-cdef-0123-456789abcdef";
+        app.chats = vec![
+            crate::model::Chat {
+                agent: AgentKind::Codex,
+                id: id.into(),
+                title: id.into(),
+                path: PathBuf::new(),
+                cwd: "/tmp/night".into(),
+                live: false,
+                at: 86_400,
+                tokens: Some(12_500),
+            },
+            sample_chat(AgentKind::Grok, "desk towers", "/tmp/other", 200_000, None),
+            sample_chat(
+                AgentKind::Claude,
+                "Name the desk",
+                "-Users-serhiirihgt-dev-granttap-mcp",
+                0,
+                Some(999),
+            ),
+        ];
+        let lines = app.lines();
+        let towers = lines
+            .iter()
+            .find(|line| line.contains("desk towers"))
+            .unwrap();
+        assert!(towers.contains('—'), "{towers}");
+        assert!(!towers.ends_with("Grok"), "{towers}");
+        let named = lines
+            .iter()
+            .find(|line| line.contains("Name the desk"))
+            .unwrap();
+        assert!(named.contains("999"), "{named}");
+        assert!(!named.ends_with("Claude"), "{named}");
+        let codex = lines.iter().find(|line| line.contains("12.5k")).unwrap();
+        assert!(codex.contains(&stamp(86_400)), "{codex}");
+        assert!(codex.contains("night"), "{codex}");
+        assert!(!codex.contains(id), "{codex}");
+        assert!(!codex.ends_with("Codex"), "{codex}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{1b}[38;5;196mGrok"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{1b}[38;5;39mClaude"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\u{1b}[38;5;51mCodex"))
+        );
+        app.cursor = lines
+            .iter()
+            .position(|line| line.contains("Name the desk"))
+            .unwrap();
+        let screen = crate::ui::Screen::paint(&app, 80, 24);
+        assert!(screen.frame.contains("38;5;196"), "{}", screen.frame);
+        assert!(screen.frame.contains("38;5;51"), "{}", screen.frame);
+        let gold = screen.frame.split("38;5;220").nth(1).unwrap_or("");
+        assert!(gold.contains("Name the desk"), "{gold}");
+        app.cursor = 0;
+        let screen = crate::ui::Screen::paint(&app, 80, 24);
+        assert!(screen.frame.contains("38;5;39"), "{}", screen.frame);
+    }
+
+    #[test]
+    fn a_double_click_opens_the_row_and_does_not_run_the_command() {
+        let mut app = App::new(PathBuf::from("/tmp/night"), PathBuf::from("/nowhere-home"));
+        app.chats = vec![sample_chat(
+            AgentKind::Grok,
+            "desk towers",
+            "/tmp/night",
+            10,
+            None,
+        )];
+        app.section = Section::Chats;
+        app.cursor = 0;
+        let effect = app.apply_keys(
+            &[
+                Key::Paste("files".into()),
+                Key::Click { x: 2, y: 4 },
+                Key::Ignore,
+                Key::Click { x: 2, y: 4 },
+                Key::Ignore,
+            ],
+            |_, _| Some(crate::ui::Spot::Row(0)),
+        );
+        assert_eq!(effect, Effect::None);
+        assert_eq!(app.section, Section::Chats);
+        assert_eq!(app.cmd, "files");
+        assert!(app.pane().is_some());
+        app.on_key(Key::Enter);
+        assert_eq!(app.section, Section::Files);
+        assert!(app.cmd.is_empty());
+    }
+
+    #[test]
+    fn the_open_chat_keeps_line_color() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-ink-{n}"));
+        let dir = home.join("chat");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":\"first paragraph\\n\\nsecond paragraph\"}\n{\"type\":\"assistant\",\"content\":\"answer one\\nanswer two\"}\n",
+        )
+        .unwrap();
+        let mut app = App::new(home.clone(), home.clone());
+        app.chats = vec![sample_chat(
+            AgentKind::Claude,
+            "ink chat",
+            "/tmp/night",
+            10,
+            None,
+        )];
+        app.chats[0].path = dir;
+        app.section = Section::Chats;
+        app.on_key(Key::Enter);
+        let frame = crate::ui::Screen::paint(&app, 100, 24).frame;
+        let user_at = frame.find("second paragraph").expect("second paragraph");
+        assert!(
+            frame[..user_at].ends_with("38;5;51m"),
+            "user continuation lost its color"
+        );
+        let answer_at = frame.find("answer two").expect("answer two");
+        assert!(
+            frame[..answer_at].ends_with("38;5;203m"),
+            "assistant continuation lost its color"
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_code_fence_keeps_its_color() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-fence-{n}"));
+        let dir = home.join("chat");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("chat_history.jsonl"),
+            "{\"type\":\"assistant\",\"content\":\"intro\\n\\n# Title\\n\\n```\\n    let desk = 1;\\n```\\n\"}\n",
+        )
+        .unwrap();
+        let mut app = App::new(home.clone(), home.clone());
+        app.chats = vec![sample_chat(
+            AgentKind::Claude,
+            "fence chat",
+            "/tmp/night",
+            10,
+            None,
+        )];
+        app.chats[0].path = dir;
+        app.section = Section::Chats;
+        app.on_key(Key::Enter);
+        let frame = crate::ui::Screen::paint(&app, 120, 30).frame;
+        let title = frame.find("# Title").expect("heading");
+        assert!(frame[..title].ends_with("38;5;220m"));
+        let code = frame.find("    let desk = 1;").expect("code");
+        assert!(frame[..code].ends_with("38;5;114m"));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn enter_opens_the_row_in_a_split_beside_the_list() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("granttap-pane-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let one = dir.join("one");
+        let two = dir.join("two");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            one.join("chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first desk\"}]}\n{\"type\":\"assistant\",\"content\":\"opened one\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            two.join("chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":\"second desk\"}\n{\"type\":\"assistant\",\"content\":\"opened two\"}\n",
+        )
+        .unwrap();
+        let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
+        app.chats = vec![
+            sample_chat(AgentKind::Grok, "first title", "/tmp/night", 2, None),
+            sample_chat(AgentKind::Claude, "second title", "/tmp/other", 1, None),
+        ];
+        app.chats[0].path = one.clone();
+        app.chats[1].path = two;
+        app.section = Section::Chats;
+        app.cursor = 0;
+        app.on_key(Key::Enter);
+        assert!(app.pane().is_some());
+        let opened = app.lines().join("\n");
+        assert!(opened.contains("first title"), "{opened}");
+        assert!(opened.contains("first desk"), "{opened}");
+        assert!(opened.contains("opened one"), "{opened}");
+        assert!(app.suggestions().is_empty());
+        let screen = crate::ui::Screen::paint(&app, 120, 24);
+        assert!(screen.frame.contains("second title"), "{}", screen.frame);
+        assert!(screen.frame.contains("first desk"));
+        assert!(screen.frame.contains('|'));
+        app.on_key(Key::Down);
+        let opened = app.lines().join("\n");
+        assert!(opened.contains("second title"), "{opened}");
+        assert!(opened.contains("second desk"), "{opened}");
+        app.on_key(Key::Esc);
+        assert!(app.pane().is_none());
+        assert!(app.lines().iter().any(|line| line.contains("first title")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn needs_you_sits_above_the_list() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-ask-{n}"));
+        let cwd = "/tmp/night";
+        let id = "ask-session";
+        let dir = crate::agents::session_path(&home, cwd, id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            home.join(".grok/active_sessions.json"),
+            format!(
+                "[{{\"session_id\":\"{id}\",\"pid\":{},\"cwd\":\"{cwd}\"}}]",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("events.jsonl"),
+            "{\"type\":\"permission_requested\",\"tool_name\":\"run_terminal_command\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("signals.json"),
+            r#"{"contextTokensUsed":88,"contextWindowTokens":100}"#,
+        )
+        .unwrap();
+        let mut app = App::new(PathBuf::from("/tmp/night"), home.clone());
+        app.chats = vec![sample_chat(AgentKind::Grok, "release audit", cwd, 10, None)];
+        app.chats[0].id = id.into();
+        app.chats[0].path = dir;
+        app.section = Section::Chats;
+        app.refresh_asks();
+        let screen = crate::ui::Screen::paint(&app, 100, 24);
+        assert!(screen.frame.contains("needs you"));
+        assert!(screen.frame.contains("permission run_terminal_command"));
+        assert!(screen.frame.contains("! release audit") || app.lines()[0].contains("! release"));
+        app.on_key(Key::Enter);
+        let opened = app.lines().join("\n");
+        assert!(opened.contains("context 88%"), "{opened}");
+        assert!(
+            opened.contains("needs you  permission run_terminal_command"),
+            "{opened}"
+        );
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn chat_scroll_stops_at_the_ends() {
+        let mut app = App::new(PathBuf::from("."), PathBuf::from("/nowhere-home"));
+        app.chats = vec![
+            crate::model::Chat {
+                agent: AgentKind::Claude,
+                id: "one".into(),
+                title: "first".into(),
+                path: PathBuf::new(),
+                cwd: String::new(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+            crate::model::Chat {
+                agent: AgentKind::Grok,
+                id: "two".into(),
+                title: "last".into(),
+                path: PathBuf::new(),
+                cwd: String::new(),
+                live: false,
+                at: 0,
+                tokens: None,
+            },
+        ];
+        app.section = Section::Chats;
+        app.cursor = 0;
+        app.on_key(Key::Up);
+        app.on_key(Key::Wheel(-1));
+        assert_eq!(app.cursor, 0);
+        let last = app.lines().len() - 1;
+        app.cursor = last;
+        app.on_key(Key::Down);
+        app.on_key(Key::Wheel(1));
+        assert_eq!(app.cursor, last);
+    }
+
+    #[test]
+    fn the_open_chat_scrolls_by_paragraph() {
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-scroll-{n}"));
+        let dir = home.join("chat");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut body = String::new();
+        for index in 0..40 {
+            body.push_str(&format!(
+                "{{\"type\":\"user\",\"content\":\"paragraph {index:02}\"}}\n"
+            ));
+        }
+        std::fs::write(dir.join("chat_history.jsonl"), body).unwrap();
+        let mut app = App::new(home.clone(), home.clone());
+        app.chats = vec![sample_chat(
+            AgentKind::Claude,
+            "long chat",
+            "/tmp/night",
+            10,
+            None,
+        )];
+        app.chats[0].path = dir.clone();
+        app.section = Section::Chats;
+        app.on_key(Key::Enter);
+        let tail = crate::ui::Screen::paint(&app, 100, 24);
+        assert!(tail.frame.contains("paragraph 39"), "{}", tail.frame);
+        assert!(!tail.frame.contains("paragraph 00"), "{}", tail.frame);
+        let cursor = app.cursor;
+        for _ in 0..30 {
+            app.on_key(Key::Wheel(-1));
+        }
+        let older = crate::ui::Screen::paint(&app, 100, 24);
+        assert!(older.frame.contains("paragraph 00"), "{}", older.frame);
+        assert_eq!(app.cursor, cursor);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]
@@ -1542,7 +3297,11 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("granttap-page-{n}"));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("hi.html"), "<title>Башни</title><p>Hello</p><script>no</script>").unwrap();
+        std::fs::write(
+            dir.join("hi.html"),
+            "<title>Башни</title><p>Hello</p><script>no</script>",
+        )
+        .unwrap();
         let mut app = App::new(dir.clone(), PathBuf::from("/nowhere-home"));
         app.cmd = "browse hi.html".into();
         app.on_key(Key::Enter);
@@ -1590,7 +3349,10 @@ mod tests {
             id: "s".into(),
             title: "s".into(),
             path: PathBuf::new(),
+            cwd: dir.display().to_string(),
             live: true,
+            at: 0,
+            tokens: None,
         });
         app.cursor = 0;
         app.cmd = "accept full".into();

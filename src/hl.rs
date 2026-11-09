@@ -2,8 +2,8 @@ const KEYWORD: &str = "\x1b[38;5;196m";
 const STRING: &str = "\x1b[38;5;39m";
 const COMMENT: &str = "\x1b[38;5;67m";
 const INTEGER: &str = "\x1b[38;5;45m";
-const TEXT: &str = "\x1b[38;5;153m";
-const RESET: &str = "\x1b[0m";
+const TEXT: &str = "\x1b[38;5;203m";
+const RESET: &str = "\x1b[0;48;5;0m";
 
 pub fn paint_ext(line: &str, ext: &str) -> String {
     if ext.is_empty() {
@@ -85,7 +85,8 @@ fn is_keyword(word: &str, ext: &str) -> bool {
     match ext {
         "py" => matches!(
             word,
-            "def" | "class"
+            "def"
+                | "class"
                 | "if"
                 | "elif"
                 | "else"
@@ -118,7 +119,8 @@ fn is_keyword(word: &str, ext: &str) -> bool {
         ),
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => matches!(
             word,
-            "function" | "const"
+            "function"
+                | "const"
                 | "let"
                 | "var"
                 | "if"
@@ -145,7 +147,8 @@ fn is_keyword(word: &str, ext: &str) -> bool {
         ),
         "go" => matches!(
             word,
-            "func" | "package"
+            "func"
+                | "package"
                 | "import"
                 | "if"
                 | "else"

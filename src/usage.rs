@@ -39,7 +39,11 @@ fn object_key_after(text: &str, key: &str) -> Option<String> {
     let rest = after.trim_start().trim_start_matches(':').trim_start();
     let rest = rest.trim_start_matches('{').trim_start();
     let raw = rest.trim_start_matches('"').split('"').next()?;
-    if raw.is_empty() { None } else { Some(raw.to_string()) }
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
 }
 
 #[cfg(test)]

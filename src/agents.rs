@@ -62,18 +62,58 @@ pub fn grok_usage(home: &Path) -> Option<String> {
     Some(line)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ask {
+    pub agent: AgentKind,
+    pub session_id: String,
+    pub cwd: String,
+    pub label: String,
+}
+
+pub fn asks(home: &Path) -> Vec<Ask> {
+    live_asks(home).0
+}
+
 pub fn questions(home: &Path) -> String {
-    let path = home.join(".grok/active_sessions.json");
-    if !path.is_file() {
+    let (asks, known) = live_asks(home);
+    if !home.join(".grok/active_sessions.json").is_file() {
         return "no data".into();
+    }
+    if let Some(ask) = asks.first() {
+        return ask.label.clone();
+    }
+    if grok_sessions(home).iter().any(|item| item.alive) {
+        if known {
+            "none".into()
+        } else {
+            "no data".into()
+        }
+    } else {
+        "none".into()
+    }
+}
+
+pub fn context_line(path: &Path) -> Option<String> {
+    let dir = if path.is_dir() { path } else { path.parent()? };
+    let text = fs::read_to_string(dir.join("signals.json")).ok()?;
+    let used = number_depth1(&text, "contextTokensUsed")?;
+    let window = number_depth1(&text, "contextWindowTokens")?;
+    if window == 0 {
+        return None;
+    }
+    let pct = used.saturating_mul(100) / window;
+    Some(format!("context {pct}%"))
+}
+
+fn live_asks(home: &Path) -> (Vec<Ask>, bool) {
+    if !home.join(".grok/active_sessions.json").is_file() {
+        return (Vec::new(), false);
     }
     let live: Vec<_> = grok_sessions(home)
         .into_iter()
         .filter(|item| item.alive)
         .collect();
-    if live.is_empty() {
-        return "none".into();
-    }
+    let mut asks = Vec::new();
     let mut known = false;
     for session in &live {
         let dir = session_path(home, &session.cwd, &session.id);
@@ -81,21 +121,28 @@ pub fn questions(home: &Path) -> String {
             continue;
         }
         match plan_waiting(&dir) {
-            Some(true) => return "plan approval".into(),
+            Some(true) => asks.push(Ask {
+                agent: AgentKind::Grok,
+                session_id: session.id.clone(),
+                cwd: session.cwd.clone(),
+                label: "plan approval".into(),
+            }),
             Some(false) => known = true,
             None => {}
         }
-        match permission_state(&dir) {
-            Some(Some(tool)) => return format!("permission {tool}"),
-            Some(None) => known = true,
-            None => {}
+        if let Some(open) = permission_state(&dir) {
+            match open {
+                Some(tool) => asks.push(Ask {
+                    agent: AgentKind::Grok,
+                    session_id: session.id.clone(),
+                    cwd: session.cwd.clone(),
+                    label: format!("permission {tool}"),
+                }),
+                None => known = true,
+            }
         }
     }
-    if known {
-        "none".into()
-    } else {
-        "no data".into()
-    }
+    (asks, known)
 }
 
 pub fn apply_permit(home: &Path, dir: &Path, permit: Permit) -> String {
@@ -103,7 +150,12 @@ pub fn apply_permit(home: &Path, dir: &Path, permit: Permit) -> String {
     let claude = claude_mode(permit);
     let codex = codex_mode(permit);
     [
-        match set_toml(&home.join(".grok/config.toml"), "ui", "permission_mode", grok) {
+        match set_toml(
+            &home.join(".grok/config.toml"),
+            "ui",
+            "permission_mode",
+            grok,
+        ) {
             Ok(()) => format!("Grok {grok}"),
             Err(err) => format!("Grok {err}"),
         },
@@ -111,7 +163,12 @@ pub fn apply_permit(home: &Path, dir: &Path, permit: Permit) -> String {
             Ok(()) => format!("Claude {claude}"),
             Err(err) => format!("Claude {err}"),
         },
-        match set_toml(&home.join(".codex/config.toml"), "", "approval_policy", codex) {
+        match set_toml(
+            &home.join(".codex/config.toml"),
+            "",
+            "approval_policy",
+            codex,
+        ) {
             Ok(()) => format!("Codex {codex}"),
             Err(err) => format!("Codex {err}"),
         },
@@ -241,7 +298,8 @@ fn write_claude_mode(dir: &Path, mode: &str) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     if !path.is_file() {
-        let body = format!("{{\n  \"permissions\": {{\n    \"defaultMode\": \"{mode}\"\n  }}\n}}\n");
+        let body =
+            format!("{{\n  \"permissions\": {{\n    \"defaultMode\": \"{mode}\"\n  }}\n}}\n");
         return fs::write(&path, body).map_err(|err| err.to_string());
     }
     let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
@@ -324,7 +382,11 @@ fn header(trimmed: &str) -> Option<String> {
 fn toml_key(trimmed: &str) -> Option<&str> {
     let (key, _) = trimmed.split_once('=')?;
     let key = key.trim();
-    if !key.is_empty() && key.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
         Some(key)
     } else {
         None
@@ -454,7 +516,9 @@ fn tail(path: &Path, max: u64) -> Option<String> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
     let mut text = String::from_utf8_lossy(&buf).into_owned();
-    if len > max && let Some(pos) = text.find('\n') {
+    if len > max
+        && let Some(pos) = text.find('\n')
+    {
         text.drain(..=pos);
     }
     Some(text)
@@ -466,11 +530,7 @@ fn safe_tool(name: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
         .take(40)
         .collect();
-    if tool.is_empty() {
-        "tool".into()
-    } else {
-        tool
-    }
+    if tool.is_empty() { "tool".into() } else { tool }
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -479,6 +539,25 @@ fn pid_alive(pid: u32) -> bool {
     }
     let rc = unsafe { libc::kill(pid as i32, 0) };
     rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+pub fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = &text[index + 1..index + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn percent(text: &str) -> String {
@@ -613,8 +692,14 @@ fn number_depth1(text: &str, key: &str) -> Option<u64> {
                 chars.next();
             }
             if raw == key && depth == 1 {
-                let after = text[skip_to..].trim_start().trim_start_matches(':').trim_start();
-                let digits: String = after.chars().take_while(|item| item.is_ascii_digit()).collect();
+                let after = text[skip_to..]
+                    .trim_start()
+                    .trim_start_matches(':')
+                    .trim_start();
+                let digits: String = after
+                    .chars()
+                    .take_while(|item| item.is_ascii_digit())
+                    .collect();
                 return digits.parse().ok();
             }
             continue;
@@ -623,6 +708,90 @@ fn number_depth1(text: &str, key: &str) -> Option<u64> {
             '{' | '[' => depth += 1,
             '}' | ']' => depth -= 1,
             _ => {}
+        }
+    }
+    None
+}
+
+pub struct Face {
+    pub model: String,
+    pub effort: String,
+    pub permission: String,
+}
+
+pub fn face(home: &Path, dir: &Path, agent: AgentKind, permit: Permit) -> Face {
+    let (model, effort, permission) = match agent {
+        AgentKind::Grok => {
+            let text = read_cap(&home.join(".grok/config.toml"));
+            (
+                toml_get(&text, "models", "default"),
+                toml_get(&text, "models", "default_reasoning_effort"),
+                toml_get(&text, "ui", "permission_mode"),
+            )
+        }
+        AgentKind::Claude => {
+            let settings = read_cap(&home.join(".claude/settings.json"));
+            let local = read_cap(&dir.join(".claude/settings.local.json"));
+            (
+                json_string(&local, "model"),
+                json_string(&settings, "effortLevel"),
+                json_string(&local, "defaultMode"),
+            )
+        }
+        AgentKind::Codex => {
+            let text = read_cap(&home.join(".codex/config.toml"));
+            (
+                toml_get(&text, "", "model"),
+                toml_get(&text, "", "model_reasoning_effort"),
+                toml_get(&text, "", "approval_policy"),
+            )
+        }
+    };
+    let permission = permission.unwrap_or_else(|| match agent {
+        AgentKind::Grok => grok_mode(permit).into(),
+        AgentKind::Claude => claude_mode(permit).into(),
+        AgentKind::Codex => codex_mode(permit).into(),
+    });
+    Face {
+        model: model.unwrap_or_else(|| "—".into()),
+        effort: effort.unwrap_or_else(|| "—".into()),
+        permission,
+    }
+}
+
+fn read_cap(path: &Path) -> String {
+    let Ok(meta) = fs::metadata(path) else {
+        return String::new();
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return String::new();
+    }
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let mut buf = vec![0u8; usize::try_from(meta.len().min(64 * 1024)).unwrap_or(0)];
+    let Ok(n) = file.read(&mut buf) else {
+        return String::new();
+    };
+    buf.truncate(n);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn toml_get(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut current = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(name) = header(trimmed) {
+            current = name;
+            continue;
+        }
+        if current == section && toml_key(trimmed) == Some(key) {
+            let (start, end) = quoted_span(trimmed)?;
+            let value = trimmed[start..end].to_string();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value);
         }
     }
     None
@@ -780,6 +949,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(questions(&home), "plan approval");
+        let found = asks(&home);
+        assert!(found.iter().any(|ask| ask.label == "plan approval"));
+        assert!(
+            found
+                .iter()
+                .any(|ask| ask.label == "permission run_terminal_command")
+        );
+        assert_eq!(context_line(&dir).as_deref(), Some("context 30%"));
         let _ = fs::remove_dir_all(home);
     }
 }

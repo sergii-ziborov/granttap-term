@@ -82,10 +82,7 @@ fn call(line: &str, home: &Path) -> String {
                         preview.mark.bytes,
                         preview.picture
                     );
-                    let text = format!(
-                        "{text}\n{}\n{}",
-                        preview.sixel, preview.kitty
-                    );
+                    let text = format!("{text}\n{}\n{}", preview.sixel, preview.kitty);
                     format!(
                         "{{\"content\":[{{\"type\":\"text\",\"text\":{}}}]}}",
                         quote(&text)
@@ -320,7 +317,10 @@ mod tests {
             id: "ab/c".into(),
             title: "Desk".into(),
             path: transcript,
+            cwd: String::new(),
             live: false,
+            at: 0,
+            tokens: None,
         };
         chats::write_handoff(&home, &chat, crate::model::AgentKind::Grok).unwrap();
         let response = handle(

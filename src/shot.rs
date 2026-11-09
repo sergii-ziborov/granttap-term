@@ -24,7 +24,10 @@ pub fn write_all(out_dir: &Path) -> io::Result<()> {
         home.join(".codex/session_index.jsonl"),
         "{\"id\":\"codexdemo01\",\"thread_name\":\"Ship the desk\"}\n",
     )?;
-    fs::write(home.join(".claude/projects/demo/claudedemo01.jsonl"), "{}\n")?;
+    fs::write(
+        home.join(".claude/projects/demo/claudedemo01.jsonl"),
+        "{}\n",
+    )?;
     fs::write(
         home.join(".grok/sessions/work/one/summary.json"),
         "{\"generated_title\":\"Night desk\"}\n",
@@ -34,7 +37,10 @@ pub fn write_all(out_dir: &Path) -> io::Result<()> {
         "mod app;\nfn main() {\n    let city = \"Night\";\n}\n",
     )?;
     fs::write(dir.join("src/app.rs"), "pub fn run() {}\nstruct Desk {}\n")?;
-    fs::write(dir.join("Cargo.toml"), "[package]\nname = \"desk\"\n\n[dependencies]\nlibc = \"0.2\"\n")?;
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"desk\"\n\n[dependencies]\nlibc = \"0.2\"\n",
+    )?;
     fs::write(
         dir.join("page.html"),
         "<title>Night City</title><p>Keep the desk.</p><ul><li>Chats</li><li>Mesh</li></ul>\n",
@@ -44,7 +50,6 @@ pub fn write_all(out_dir: &Path) -> io::Result<()> {
     git(&dir, &["commit", "-m", "start the desk"])?;
     fs::create_dir_all(out_dir)?;
     let mut app = App::new(dir.clone(), home.clone());
-    app.vim = true;
     app.model = "codex".into();
     save(out_dir, "chats", &app)?;
     app.cmd = "task Hold the line".into();

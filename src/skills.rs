@@ -69,8 +69,16 @@ mod tests {
         fs::write(home.join(".codex/skills/review/SKILL.md"), "# review\n").unwrap();
         fs::create_dir_all(home.join(".claude/skills/empty")).unwrap();
         let skills = load(&home, &home);
-        assert!(skills.iter().any(|skill| skill.agent == "claude" && skill.name == "ship"));
-        assert!(skills.iter().any(|skill| skill.agent == "codex" && skill.name == "review"));
+        assert!(
+            skills
+                .iter()
+                .any(|skill| skill.agent == "claude" && skill.name == "ship")
+        );
+        assert!(
+            skills
+                .iter()
+                .any(|skill| skill.agent == "codex" && skill.name == "review")
+        );
         assert!(!skills.iter().any(|skill| skill.name == "empty"));
         let _ = fs::remove_dir_all(home);
     }
