@@ -21,9 +21,7 @@ pub fn serve() -> io::Result<()> {
 }
 
 fn home() -> std::path::PathBuf {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
+    crate::store::user_home().unwrap_or_default()
 }
 
 pub fn handle(line: &str, home: &Path) -> String {
@@ -40,7 +38,7 @@ pub fn handle(line: &str, home: &Path) -> String {
     }
 }
 
-const TOOLS: &str = r#"{"tools":[{"name":"list_chats","description":"Local Grok, Claude, and Codex chats on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"preview_image","description":"Cell preview of a local image for a test.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},{"name":"git_history","description":"Recent commits through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"git_read_blob","description":"UTF-8 file at a revision through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"file":{"type":"string"},"revision":{"type":"string"}},"required":["file"]}},{"name":"browse_page","description":"Text rendering of a local page or http(s) URL for a test.","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},{"name":"list_mesh","description":"Repo, Weavatrix registry, and linked repos for a root.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"list_skills","description":"Claude, Codex, and shared skills visible on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"read_handoff","description":"Read a chat handoff written by move.","inputSchema":{"type":"object","properties":{"chat":{"type":"string"}},"required":["chat"]}},{"name":"read_skill","description":"Read a Claude, Codex, or shared skill file.","inputSchema":{"type":"object","properties":{"skill":{"type":"string"}},"required":["skill"]}}]}"#;
+const TOOLS: &str = r#"{"tools":[{"name":"list_chats","description":"Local Grok, Claude, and Codex chats on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"preview_image","description":"Cell preview of a local image for a test.","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},{"name":"git_history","description":"Recent commits through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"git_read_blob","description":"UTF-8 file at a revision through Weavatrix git.","inputSchema":{"type":"object","properties":{"root":{"type":"string"},"file":{"type":"string"},"revision":{"type":"string"}},"required":["file"]}},{"name":"browse_page","description":"Text rendering of a local page or http(s) URL for a test.","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},{"name":"list_mesh","description":"Repo, Weavatrix registry, and linked repos for a root.","inputSchema":{"type":"object","properties":{"root":{"type":"string"}}}},{"name":"list_skills","description":"Claude, Codex, and shared skills visible on this computer.","inputSchema":{"type":"object","properties":{}}},{"name":"read_handoff","description":"Read a chat handoff written by move.","inputSchema":{"type":"object","properties":{"chat":{"type":"string"}},"required":["chat"]}},{"name":"read_skill","description":"Read a Claude, Codex, or shared skill file.","inputSchema":{"type":"object","properties":{"skill":{"type":"string"}},"required":["skill"]}},{"name":"browser_session","description":"The page open in the GrantTap Term desk: url, js, live, size, hits, and text.","inputSchema":{"type":"object","properties":{}}},{"name":"browser_act","description":"Drive the open desk browser: open, back, forward, reload, click, type, key, js, live, mark.","inputSchema":{"type":"object","properties":{"action":{"type":"string"},"text":{"type":"string"}},"required":["action"]}}]}"#;
 
 fn call(line: &str, home: &Path) -> String {
     let name = json_string(line, "name").unwrap_or_default();
@@ -117,6 +115,18 @@ fn call(line: &str, home: &Path) -> String {
             }
         }
         "list_mesh" => text_result(&mesh_text(home, &root_arg(line))),
+        "browser_session" => text_result(&session_text(home)),
+        "browser_act" => {
+            let Some(action) = json_string(line, "action") else {
+                return r#"{"content":[{"type":"text","text":"action is required"}],"isError":true}"#
+                    .into();
+            };
+            let text = json_string(line, "text").unwrap_or_default();
+            match queue_browser_act(home, &action, &text) {
+                Ok(body) => text_result(&body),
+                Err(err) => error_text(&err),
+            }
+        }
         "read_handoff" => {
             let Some(chat) = json_string(line, "chat") else {
                 return r#"{"content":[{"type":"text","text":"chat is required"}],"isError":true}"#
@@ -199,7 +209,190 @@ fn mesh_text(home: &Path, root: &str) -> String {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    format!("Repo  {repo}\nWeavatrix  {names}")
+    let board = crate::health::scan(root_path, false, false);
+    let mut faults = String::new();
+    for (rel, why) in board.faults().take(12) {
+        faults.push_str(&format!("! {rel}  {why}\n"));
+    }
+    if faults.is_empty() {
+        faults = "none\n".into();
+    }
+    format!(
+        "Repo  {repo}\nWeavatrix  {names}\nUnhealthy  {}\n{faults}",
+        board.unhealthy_count()
+    )
+}
+
+fn browser_dir(home: &Path) -> Option<std::path::PathBuf> {
+    if !home.is_dir() {
+        return None;
+    }
+    let dir = home.join(".granttap-term");
+    fs_create(&dir)?;
+    Some(dir)
+}
+
+fn fs_create(dir: &Path) -> Option<()> {
+    if dir.is_dir() || std::fs::create_dir_all(dir).is_ok() {
+        Some(())
+    } else {
+        None
+    }
+}
+
+pub(crate) fn write_browser_snapshot(home: &Path, body: &str) {
+    let Some(dir) = browser_dir(home) else {
+        return;
+    };
+    let _ = std::fs::write(dir.join("browser.txt"), body);
+}
+
+pub(crate) fn write_browser_ack(home: &Path, body: &str) {
+    let Some(dir) = browser_dir(home) else {
+        return;
+    };
+    let _ = std::fs::write(dir.join("browser-ack.txt"), body);
+}
+
+pub(crate) fn take_browser_command(home: &Path) -> Option<String> {
+    let dir = home.join(".granttap-term");
+    let path = dir.join("browser-cmd.txt");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let first = lines.next()?.to_string();
+    let rest = lines.collect::<Vec<_>>().join("\n");
+    if !rest.is_empty() {
+        let _ = std::fs::write(&path, format!("{rest}\n"));
+    }
+    Some(first)
+}
+
+fn read_snapshot(home: &Path) -> String {
+    std::fs::read_to_string(home.join(".granttap-term/browser.txt")).unwrap_or_default()
+}
+
+fn read_ack(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join(".granttap-term/browser-ack.txt")).ok()?;
+    let text = text.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn session_text(home: &Path) -> String {
+    let raw = read_snapshot(home);
+    if raw.trim().is_empty() {
+        return "No browser session. Open GrantTap Term.".into();
+    }
+    format_session(&raw)
+}
+
+fn format_session(raw: &str) -> String {
+    let mut url = String::new();
+    let mut js = String::new();
+    let mut live = String::new();
+    let mut bytes = String::new();
+    let mut net = String::new();
+    let mut busy = String::new();
+    let mut open = String::new();
+    let mut stamp = 0i64;
+    let mut hits = Vec::new();
+    let mut text = Vec::new();
+    let mut mode = "";
+    for line in raw.lines() {
+        if line == "hits" {
+            mode = "hits";
+            continue;
+        }
+        if line == "text" {
+            mode = "text";
+            continue;
+        }
+        if mode == "hits" {
+            hits.push(line.to_string());
+            continue;
+        }
+        if mode == "text" {
+            text.push(line.to_string());
+            continue;
+        }
+        let Some((key, value)) = line.split_once('\t') else {
+            continue;
+        };
+        match key {
+            "stamp" => stamp = value.parse().unwrap_or(0),
+            "url" => url = value.to_string(),
+            "js" => js = if value == "1" { "on".into() } else { "off".into() },
+            "live" => live = if value == "1" { "on".into() } else { "off".into() },
+            "bytes" => bytes = value.to_string(),
+            "net" => net = value.to_string(),
+            "busy" => busy = if value == "1" { "yes".into() } else { "no".into() },
+            "open" => open = if value == "1" { "yes".into() } else { "no".into() },
+            _ => {}
+        }
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let fresh = stamp > 0 && now.saturating_sub(stamp) <= 3;
+    let state = if fresh { "live" } else { "stale" };
+    let mut out = format!(
+        "session {state}\nurl  {url}\nopen {open}  js {js}  live {live}  busy {busy}\nsize {bytes}  net {net}\nhits\n"
+    );
+    if hits.is_empty() {
+        out.push_str("none\n");
+    } else {
+        for hit in hits.iter().take(40) {
+            out.push_str(hit);
+            out.push('\n');
+        }
+    }
+    out.push_str("text\n");
+    if text.is_empty() {
+        out.push_str("empty\n");
+    } else {
+        for line in text.iter().take(60) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn queue_browser_act(home: &Path, action: &str, text: &str) -> Result<String, String> {
+    let line = match action {
+        "open" | "type" | "key" | "click" => {
+            if text.is_empty() {
+                return Err(format!("{action} needs text"));
+            }
+            format!("{action}\t{text}")
+        }
+        "back" | "forward" | "reload" | "js" | "live" | "mark" => action.to_string(),
+        _ => return Err(format!("unknown action {action}")),
+    };
+    let Some(dir) = browser_dir(home) else {
+        return Err("no home for the desk".into());
+    };
+    let _ = std::fs::remove_file(dir.join("browser-ack.txt"));
+    let path = dir.join("browser-cmd.txt");
+    let mut previous = std::fs::read_to_string(&path).unwrap_or_default();
+    if !previous.is_empty() && !previous.ends_with('\n') {
+        previous.push('\n');
+    }
+    previous.push_str(&line);
+    previous.push('\n');
+    std::fs::write(&path, previous).map_err(|err| err.to_string())?;
+    let spins = if cfg!(test) { 0 } else { 160 };
+    for _ in 0..spins {
+        if read_ack(home).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if let Some(ack) = read_ack(home) {
+        return Ok(format!("{ack}\n{}", session_text(home)));
+    }
+    Ok(format!("queued\n{}", session_text(home)))
 }
 
 fn text_result(text: &str) -> String {
@@ -321,6 +514,7 @@ mod tests {
             live: false,
             at: 0,
             tokens: None,
+            window: None,
         };
         chats::write_handoff(&home, &chat, crate::model::AgentKind::Grok).unwrap();
         let response = handle(
@@ -350,6 +544,53 @@ mod tests {
         );
         assert!(skill.contains("Keep the desk"));
         assert!(skill.contains("\"id\":7"));
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn the_browser_tools_read_and_queue_the_desk_session() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!("granttap-mcp-browser-{n}"));
+        std::fs::create_dir_all(home.join(".granttap-term")).unwrap();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        std::fs::write(
+            home.join(".granttap-term/browser.txt"),
+            format!("stamp\t{stamp}\nurl\thttps://example.com/desk\njs\t1\nlive\t1\nbytes\t12\nnet\t40\nbusy\t0\nopen\t1\nhits\n0\tlink\t0\t1\t9\t1\tDocs\thttps://example.com/docs\ntext\nHello desk\n"),
+        )
+        .unwrap();
+        let listed = handle(
+            r#"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#,
+            &home,
+        );
+        assert!(listed.contains("browser_session"), "{listed}");
+        assert!(listed.contains("browser_act"), "{listed}");
+        let seen = handle(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"browser_session"}}"#,
+            &home,
+        );
+        assert!(seen.contains("https://example.com/desk"), "{seen}");
+        assert!(seen.contains("Hello desk"), "{seen}");
+        assert!(seen.contains("session live"), "{seen}");
+        let queued = handle(
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"browser_act","arguments":{"action":"reload"}}}"#,
+            &home,
+        );
+        assert!(queued.contains("queued"), "{queued}");
+        let cmd = std::fs::read_to_string(home.join(".granttap-term/browser-cmd.txt")).unwrap();
+        assert_eq!(cmd.trim(), "reload");
+        assert_eq!(take_browser_command(&home).as_deref(), Some("reload"));
+        assert!(take_browser_command(&home).is_none());
+        let missing = handle(
+            r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"browser_act","arguments":{"action":"open"}}}"#,
+            &home,
+        );
+        assert!(missing.contains("isError"), "{missing}");
         let _ = std::fs::remove_dir_all(home);
     }
 }

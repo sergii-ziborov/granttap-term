@@ -32,6 +32,29 @@ impl AgentKind {
             Self::Codex => &["low", "medium", "high", "xhigh", "max", "ultra"],
         }
     }
+
+    pub fn models(self) -> &'static [&'static str] {
+        match self {
+            Self::Grok => &["grok-4.7", "grok-4.5", "grok-4"],
+            Self::Claude => &["opus[1m]", "opus", "sonnet[1m]", "sonnet", "haiku", "fable"],
+            Self::Codex => &[
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6.1-terra",
+                "gpt-6-sol",
+                "gpt-5.6-sol",
+            ],
+        }
+    }
+
+    /// Each agent's own permission words. Claude does not use ask/safe/full.
+    pub fn permits(self) -> &'static [&'static str] {
+        match self {
+            Self::Grok => &["ask", "acceptEdits", "plan", "always-approve"],
+            Self::Claude => &["default", "acceptEdits", "plan", "bypassPermissions"],
+            Self::Codex => &["on-request", "on-failure", "never"],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,30 +65,36 @@ pub enum Section {
     Files,
     Browser,
     Lessons,
+    Term,
 }
 
 impl Section {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Chats,
         Self::Tasks,
         Self::Mesh,
         Self::Files,
         Self::Browser,
         Self::Lessons,
+        Self::Term,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Chats => "Chats",
+            Self::Chats => "now",
             Self::Tasks => "Tasks",
             Self::Mesh => "Mesh",
             Self::Files => "Files",
             Self::Browser => "Browser",
             Self::Lessons => "Lessons",
+            Self::Term => "Term",
         }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
+        if text.eq_ignore_ascii_case("chats") {
+            return Some(Self::Chats);
+        }
         Self::ALL
             .into_iter()
             .find(|section| section.label().eq_ignore_ascii_case(text))
@@ -144,6 +173,8 @@ pub struct Chat {
     pub live: bool,
     pub at: i64,
     pub tokens: Option<u64>,
+    /// Context window from signals.json. Absent when the file does not say.
+    pub window: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,10 +207,4 @@ pub struct FileRow {
     pub icon: char,
     pub dir: bool,
     pub path: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lesson {
-    pub title: &'static str,
-    pub body: &'static str,
 }

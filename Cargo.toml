@@ -4,9 +4,11 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
-libc = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 weavatrix-git = { version = "0.3.3", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = true

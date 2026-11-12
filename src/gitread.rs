@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use weavatrix_git::{HistoryOptions, ObjectKind, Repository, RepositorySet};
 
@@ -86,12 +88,175 @@ pub fn last_touch(root: &Path, path: &str) -> Result<Option<Rev>, String> {
 }
 
 pub fn dirty_paths(root: &Path) -> Result<Vec<String>, String> {
-    let repo = Repository::open(root).map_err(|err| err.to_string())?;
-    let status = repo.status().map_err(|err| err.to_string())?;
-    Ok(status
+    Ok(tracked_diff(root)?
         .into_iter()
-        .map(|entry| String::from_utf8_lossy(&entry.path).replace('\\', "/"))
+        .map(|file| file.path)
         .collect())
+}
+
+/// Tracked diff against HEAD, grouped by folder.
+/// A folder is `folder  src`. A file is `stat  name.ext  plus  minus`.
+/// At most 64 files. Untracked files are omitted. A `+0 -0` row is omitted.
+/// Line counts come from `git diff`, which skips clean files. Reading every
+/// blob here froze the desk on a repo that holds large tracked files.
+pub fn change_view(root: &Path) -> Result<Vec<String>, String> {
+    let files = tracked_diff(root)?;
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut lines = Vec::new();
+    let mut shown = 0usize;
+    let mut extra = 0usize;
+    let mut folder = String::new();
+    for file in files {
+        let (dir, name) = folder_and_name(&file.path);
+        let row = match (file.plus, file.minus) {
+            (Some(plus), Some(minus)) => format!("stat  {name}  {plus}  {minus}"),
+            _ => format!("stat  {name}"),
+        };
+        if shown == 64 {
+            extra += 1;
+            continue;
+        }
+        shown += 1;
+        if dir != folder {
+            lines.push(format!("folder  {dir}"));
+            folder = dir.to_string();
+        }
+        lines.push(row);
+    }
+    if extra > 0 {
+        lines.push(format!("changed  {extra} more"));
+    }
+    Ok(lines)
+}
+
+#[derive(Clone)]
+struct DiffFile {
+    path: String,
+    plus: Option<u32>,
+    minus: Option<u32>,
+}
+
+fn tracked_diff(root: &Path) -> Result<Vec<DiffFile>, String> {
+    if let Some(files) = fresh_diff(root) {
+        return Ok(files);
+    }
+    let bytes = git_stdout(
+        root,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--numstat",
+            "--ignore-cr-at-eol",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=all",
+            "-z",
+            "HEAD",
+        ],
+    )?;
+    let mut files = parse_numstat(&bytes);
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    remember_diff(root, &files);
+    Ok(files)
+}
+
+/// A live chat rewrites its log often. The diff does not, so a burst of
+/// flushes reuses the last `git diff` instead of stalling the desk again.
+struct DiffCache {
+    root: PathBuf,
+    at: Instant,
+    files: Vec<DiffFile>,
+}
+
+fn diff_cache() -> &'static std::sync::Mutex<Option<DiffCache>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<DiffCache>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn fresh_diff(root: &Path) -> Option<Vec<DiffFile>> {
+    let guard = diff_cache().lock().ok()?;
+    let hit = guard.as_ref()?;
+    if hit.root == root && hit.at.elapsed() < Duration::from_millis(1500) {
+        Some(hit.files.clone())
+    } else {
+        None
+    }
+}
+
+fn remember_diff(root: &Path, files: &[DiffFile]) {
+    let Ok(mut guard) = diff_cache().lock() else {
+        return;
+    };
+    *guard = Some(DiffCache {
+        root: root.to_path_buf(),
+        at: Instant::now(),
+        files: files.to_vec(),
+    });
+}
+
+fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        if err.is_empty() {
+            return Err("git diff failed".into());
+        }
+        return Err(err.to_string());
+    }
+    Ok(out.stdout)
+}
+
+fn parse_numstat(bytes: &[u8]) -> Vec<DiffFile> {
+    let mut files = Vec::new();
+    for chunk in bytes.split(|byte| *byte == 0) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(chunk);
+        let mut parts = text.split('\t');
+        let plus = parts.next().unwrap_or("");
+        let minus = parts.next().unwrap_or("");
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        let path = diff_path(path);
+        if path.is_empty() {
+            continue;
+        }
+        let plus_n = plus.parse::<u32>().ok();
+        let minus_n = minus.parse::<u32>().ok();
+        if plus_n == Some(0) && minus_n == Some(0) {
+            continue;
+        }
+        let (plus, minus) = match (plus_n, minus_n) {
+            (Some(plus), Some(minus)) => (Some(plus), Some(minus)),
+            _ => (None, None),
+        };
+        files.push(DiffFile { path, plus, minus });
+    }
+    files
+}
+
+fn diff_path(raw: &str) -> String {
+    let raw = raw.trim().replace('\\', "/");
+    let raw = raw.rsplit(" => ").next().unwrap_or(raw.as_str()).trim();
+    raw.trim_end_matches('}').to_string()
+}
+
+fn folder_and_name(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(split) => (&path[..split], &path[split + 1..]),
+        None => (".", path),
+    }
 }
 
 pub fn known_repos(home: &Path) -> Vec<(String, PathBuf)> {
@@ -260,6 +425,22 @@ mod tests {
         assert!(text.contains("fn main"));
         let touch = last_touch(&root, "a.rs").unwrap().unwrap();
         assert!(touch.subject.contains("start the file"));
+        fs::write(root.join("a.rs"), "fn main() {}\nlet x = 1;\n").unwrap();
+        fs::write(root.join("b.rs"), "fn b() {}\n").unwrap();
+        git(&["add", "b.rs"]);
+        git(&["commit", "-m", "add the quiet file"]);
+        git(&["config", "core.autocrlf", "false"]);
+        fs::write(root.join("b.rs"), "fn b() {}\r\n").unwrap();
+        fs::write(root.join("c.bin"), b"a\0b").unwrap();
+        git(&["add", "c.bin"]);
+        git(&["commit", "-m", "add a binary"]);
+        fs::write(root.join("c.bin"), b"a\0c").unwrap();
+        let diff = change_view(&root).unwrap();
+        assert!(diff.iter().any(|line| line == "folder  ."), "{diff:?}");
+        assert!(diff.iter().any(|line| line == "stat  a.rs  1  0"), "{diff:?}");
+        assert!(diff.iter().any(|line| line == "stat  c.bin"), "{diff:?}");
+        assert!(!diff.iter().any(|line| line.contains("b.rs")), "{diff:?}");
+        assert!(!diff.iter().any(|line| line.contains("fn main")), "{diff:?}");
         let _ = fs::remove_dir_all(root);
     }
 

@@ -15,6 +15,23 @@ pub struct DeskState {
     pub actions: Vec<String>,
     pub tasks: Vec<Task>,
     pub history: Vec<String>,
+    pub visits: Vec<Visit>,
+    pub web_theme: String,
+    pub web_lang: String,
+    pub web_js: bool,
+    pub web_live: bool,
+    pub bookmarks: Vec<String>,
+    pub look: String,
+    pub font_face: String,
+    pub font_size: u16,
+    pub image_quality: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Visit {
+    pub url: String,
+    pub count: u32,
+    pub last: i64,
 }
 
 impl Default for DeskState {
@@ -30,12 +47,29 @@ impl Default for DeskState {
             actions: Vec::new(),
             tasks: Vec::new(),
             history: Vec::new(),
+            visits: Vec::new(),
+            web_theme: "auto".into(),
+            web_lang: "en".into(),
+            web_js: true,
+            web_live: true,
+            bookmarks: Vec::new(),
+            look: "cyberpunk".into(),
+            font_face: String::new(),
+            font_size: 16,
+            image_quality: "high".into(),
         }
     }
 }
 
 pub fn path(home: &Path) -> PathBuf {
     home.join(".granttap-term/desk.txt")
+}
+
+pub fn user_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
 }
 
 pub fn load(home: &Path) -> DeskState {
@@ -107,12 +141,60 @@ pub fn load(home: &Path) -> DeskState {
                     state.history.push(text);
                 }
             }
+            Some("V") => {
+                let Some(count) = parts.next().and_then(|text| text.parse().ok()) else {
+                    continue;
+                };
+                let Some(last) = parts.next().and_then(|text| text.parse().ok()) else {
+                    continue;
+                };
+                let url = parts.collect::<Vec<_>>().join("\t");
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    state.visits.push(Visit { url, count, last });
+                }
+            }
+            Some("W") => {
+                if let Some(theme) = parts.next() {
+                    state.web_theme = canon_theme(theme);
+                }
+                if let Some(lang) = parts.next() {
+                    state.web_lang = canon_lang(lang);
+                }
+            }
+            Some("J") => state.web_js = parts.next() != Some("0"),
+            Some("L") => state.web_live = parts.next() != Some("0"),
+            Some("B") => {
+                let url = parts.collect::<Vec<_>>().join("\t");
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    state.bookmarks.push(url);
+                }
+            }
+            Some("D") => {
+                if let Some(look) = parts.next() {
+                    state.look = canon_look(look);
+                }
+            }
+            Some("F") => {
+                if let Some(face) = parts.next() {
+                    state.font_face = canon_face(face);
+                }
+                if let Some(size) = parts.next() {
+                    state.font_size = canon_size(size);
+                }
+            }
+            Some("I") => {
+                if let Some(quality) = parts.next() {
+                    state.image_quality = canon_quality(quality);
+                }
+            }
             _ => {}
         }
     }
     state.actions.truncate(40);
     state.tasks.truncate(40);
     state.history.truncate(100);
+    state.visits.truncate(30);
+    state.bookmarks.truncate(30);
     state
 }
 
@@ -161,7 +243,74 @@ pub fn save(home: &Path, state: &DeskState) -> std::io::Result<()> {
             body.push_str(&format!("Y\t{line}\n"));
         }
     }
+    for visit in state.visits.iter().take(30) {
+        let url = visit.url.replace(['\n', '\r', '\t'], " ");
+        if url.starts_with("http://") || url.starts_with("https://") {
+            body.push_str(&format!("V\t{}\t{}\t{url}\n", visit.count, visit.last));
+        }
+    }
+    let theme = canon_theme(&state.web_theme);
+    let lang = canon_lang(&state.web_lang);
+    body.push_str(&format!("W\t{theme}\t{lang}\n"));
+    body.push_str(&format!("J\t{}\n", if state.web_js { "1" } else { "0" }));
+    body.push_str(&format!("L\t{}\n", if state.web_live { "1" } else { "0" }));
+    for url in state.bookmarks.iter().take(30) {
+        let url = url.replace(['\n', '\r', '\t'], " ");
+        if url.starts_with("http://") || url.starts_with("https://") {
+            body.push_str(&format!("B\t{url}\n"));
+        }
+    }
+    body.push_str(&format!("D\t{}\n", canon_look(&state.look)));
+    if !state.font_face.is_empty() {
+        let face = state.font_face.replace(['\n', '\r', '\t'], " ");
+        body.push_str(&format!("F\t{face}\t{}\n", state.font_size));
+    }
+    body.push_str(&format!("I\t{}\n", canon_quality(&state.image_quality)));
     fs::write(path, body)
+}
+
+fn canon_theme(text: &str) -> String {
+    match text {
+        "dark" | "light" => text.to_string(),
+        _ => "auto".into(),
+    }
+}
+
+fn canon_lang(text: &str) -> String {
+    match text {
+        "auto" | "en" | "ru" | "uk" | "he" | "ar" | "de" | "fr" | "es" => text.to_string(),
+        _ => "en".into(),
+    }
+}
+
+fn canon_look(text: &str) -> String {
+    match text {
+        "cyberdeck" | "parchment" | "ink" | "dos" | "linux" => text.to_string(),
+        _ => "cyberpunk".into(),
+    }
+}
+
+fn canon_face(text: &str) -> String {
+    match text {
+        "Consolas" | "Cascadia Mono" | "Lucida Console" => text.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn canon_size(text: &str) -> u16 {
+    match text {
+        "12" => 12,
+        "20" => 20,
+        "24" => 24,
+        _ => 16,
+    }
+}
+
+fn canon_quality(text: &str) -> String {
+    match text {
+        "low" | "medium" => text.to_string(),
+        _ => "high".into(),
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +339,11 @@ mod tests {
             effort: "high".into(),
         });
         state.history.push("mesh".into());
+        state.visits.push(Visit {
+            url: "https://example.com/docs".into(),
+            count: 4,
+            last: 20,
+        });
         save(&home, &state).unwrap();
         let loaded = load(&home);
         assert_eq!(
@@ -205,6 +359,36 @@ mod tests {
         assert_eq!(loaded.tasks[0].owner, AgentKind::Claude);
         assert_eq!(loaded.tasks[0].title, "write the desk");
         assert_eq!(loaded.history, vec!["mesh".to_string()]);
+        assert_eq!(loaded.visits.len(), 1);
+        assert_eq!(loaded.visits[0].url, "https://example.com/docs");
+        assert_eq!(loaded.visits[0].count, 4);
+        assert_eq!(loaded.visits[0].last, 20);
+        assert_eq!(loaded.web_theme, "auto");
+        assert_eq!(loaded.web_lang, "en");
+        assert!(loaded.web_js);
+        assert!(loaded.web_live);
+        assert!(loaded.bookmarks.is_empty());
+        state.web_js = false;
+        state.web_live = false;
+        state.bookmarks.push("https://example.com/docs".into());
+        state.bookmarks.push("file://local".into());
+        save(&home, &state).unwrap();
+        let flagged = load(&home);
+        assert!(!flagged.web_js);
+        assert!(!flagged.web_live);
+        assert_eq!(flagged.bookmarks, vec!["https://example.com/docs".to_string()]);
+        state.web_theme = "dark".into();
+        state.web_lang = "ru".into();
+        save(&home, &state).unwrap();
+        let again = load(&home);
+        assert_eq!(again.web_theme, "dark");
+        assert_eq!(again.web_lang, "ru");
+        state.web_theme = "nope".into();
+        state.web_lang = "zz".into();
+        save(&home, &state).unwrap();
+        let cleaned = load(&home);
+        assert_eq!(cleaned.web_theme, "auto");
+        assert_eq!(cleaned.web_lang, "en");
         let _ = fs::remove_dir_all(home);
     }
 }

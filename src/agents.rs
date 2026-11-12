@@ -176,6 +176,33 @@ pub fn apply_permit(home: &Path, dir: &Path, permit: Permit) -> String {
     .join("  ")
 }
 
+pub fn apply_agent_permit(home: &Path, dir: &Path, agent: AgentKind, mode: &str) -> String {
+    let Ok(mode) = plain(mode) else {
+        return "permit needs a plain name".into();
+    };
+    match agent {
+        AgentKind::Grok => match set_toml(
+            &home.join(".grok/config.toml"),
+            "ui",
+            "permission_mode",
+            mode,
+        ) {
+            Ok(()) => format!("Grok {mode}"),
+            Err(err) => format!("Grok {err}"),
+        },
+        AgentKind::Claude => match write_claude_mode(dir, mode) {
+            Ok(()) => format!("Claude {mode}"),
+            Err(err) => format!("Claude {err}"),
+        },
+        AgentKind::Codex => {
+            match set_toml(&home.join(".codex/config.toml"), "", "approval_policy", mode) {
+                Ok(()) => format!("Codex {mode}"),
+                Err(err) => format!("Codex {err}"),
+            }
+        }
+    }
+}
+
 pub fn apply_model(home: &Path, dir: &Path, agent: Option<AgentKind>, model: &str) -> String {
     let Some(agent) = agent else {
         return "model kept on the desk".into();
@@ -190,9 +217,12 @@ pub fn apply_model(home: &Path, dir: &Path, agent: Option<AgentKind>, model: &st
                 Err(err) => format!("Grok {err}"),
             }
         }
-        AgentKind::Claude => match write_project_model(dir, model) {
-            Ok(()) => format!("Claude model {model}"),
-            Err(err) => format!("Claude {err}"),
+        AgentKind::Claude => match (write_user_model(home, model), write_local_model(dir, model))
+        {
+            (Ok(()), Ok(())) => format!("Claude model {model}"),
+            (Err(err), Ok(())) => format!("Claude {err}"),
+            (Ok(()), Err(err)) => format!("Claude model {model}  {err}"),
+            (Err(user), Err(local)) => format!("Claude {user}  {local}"),
         },
         AgentKind::Codex => match set_toml(&home.join(".codex/config.toml"), "", "model", model) {
             Ok(()) => format!("Codex model {model}"),
@@ -201,7 +231,7 @@ pub fn apply_model(home: &Path, dir: &Path, agent: Option<AgentKind>, model: &st
     }
 }
 
-pub fn apply_effort(home: &Path, agent: AgentKind, effort: &str) -> String {
+pub fn apply_effort(home: &Path, agent: AgentKind, effort: &str, model: &str) -> String {
     let Ok(effort) = plain(effort) else {
         return "effort needs a plain name".into();
     };
@@ -215,7 +245,7 @@ pub fn apply_effort(home: &Path, agent: AgentKind, effort: &str) -> String {
             Ok(()) => format!("Grok effort {effort}"),
             Err(err) => format!("Grok {err}"),
         },
-        AgentKind::Claude => match set_claude_effort(home, effort) {
+        AgentKind::Claude => match set_claude_effort(home, effort, model) {
             Ok(()) => format!("Claude effort {effort}"),
             Err(err) => format!("Claude {err}"),
         },
@@ -280,14 +310,51 @@ fn set_toml(path: &Path, section: &str, key: &str, value: &str) -> Result<(), St
     fs::write(path, next).map_err(|err| err.to_string())
 }
 
-fn set_claude_effort(home: &Path, effort: &str) -> Result<(), String> {
+fn set_claude_effort(home: &Path, effort: &str, model: &str) -> Result<(), String> {
+    if effort == "max" {
+        return Err("max stays in this session".into());
+    }
+    if !matches!(effort, "low" | "medium" | "high" | "xhigh") {
+        return Err("effort needs low, medium, high, or xhigh".into());
+    }
     let path = home.join(".claude/settings.json");
     if !path.is_file() {
         return Err("settings missing".into());
     }
     let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let Some(next) = replace_json_key(&text, "effortLevel", effort) else {
-        return Err("effortLevel is absent".into());
+    let with_level = if let Some(next) = replace_depth1_string(&text, "effortLevel", effort) {
+        next
+    } else {
+        insert_root_key(&text, "effortLevel", effort)?
+    };
+    let next = upsert_model_effort(&with_level, model, effort)?;
+    fs::write(&path, next).map_err(|err| err.to_string())
+}
+
+fn write_user_model(home: &Path, model: &str) -> Result<(), String> {
+    let path = home.join(".claude/settings.json");
+    if !path.is_file() {
+        return Err("settings missing".into());
+    }
+    let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let next = if let Some(next) = replace_depth1_string(&text, "model", model) {
+        next
+    } else {
+        insert_root_key(&text, "model", model)?
+    };
+    fs::write(&path, next).map_err(|err| err.to_string())
+}
+
+fn write_local_model(dir: &Path, model: &str) -> Result<(), String> {
+    let path = dir.join(".claude/settings.local.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let next = if let Some(next) = replace_depth1_string(&text, "model", model) {
+        next
+    } else {
+        insert_root_key(&text, "model", model)?
     };
     fs::write(&path, next).map_err(|err| err.to_string())
 }
@@ -312,21 +379,71 @@ fn write_claude_mode(dir: &Path, mode: &str) -> Result<(), String> {
     fs::write(&path, next).map_err(|err| err.to_string())
 }
 
-fn write_project_model(dir: &Path, model: &str) -> Result<(), String> {
-    let path = dir.join(".claude/settings.local.json");
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+fn claude_canonical(model: &str) -> String {
+    let bare = model.trim().strip_suffix("[1m]").unwrap_or(model.trim());
+    match bare {
+        "opus" | "best" => return "claude-opus-5-5".into(),
+        "sonnet" => return "claude-sonnet-5-5".into(),
+        "haiku" => return "claude-haiku-5-5".into(),
+        "fable" => return "claude-fable-5-2".into(),
+        _ => {}
     }
-    if !path.is_file() {
-        let body = format!("{{\n  \"model\": \"{model}\"\n}}\n");
-        return fs::write(&path, body).map_err(|err| err.to_string());
+    if let Some(rest) = bare.strip_prefix("claude-") {
+        let parts: Vec<&str> = rest.split('-').collect();
+        if parts.len() > 3
+            && parts[2].chars().all(|ch| ch.is_ascii_digit())
+            && parts[3].chars().all(|ch| ch.is_ascii_digit())
+        {
+            return format!("claude-{}", parts[..3].join("-"));
+        }
     }
-    let text = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    if let Some(next) = replace_json_key(&text, "model", model) {
-        return fs::write(&path, next).map_err(|err| err.to_string());
-    }
-    let next = insert_root_key(&text, "model", model)?;
-    fs::write(&path, next).map_err(|err| err.to_string())
+    bare.to_string()
+}
+
+fn upsert_model_effort(text: &str, model: &str, effort: &str) -> Result<String, String> {
+    let canonical = claude_canonical(model);
+    let entry_body = format!("{{\"effortLevel\":\"{effort}\"}}");
+    let Some(object) = json_object(text, "modelSettings") else {
+        let raw = format!("{{\"{canonical}\":{entry_body}}}");
+        return insert_root_raw(text, "modelSettings", &raw);
+    };
+    let (start, end) = slice_bounds(text, object).ok_or_else(|| "modelSettings".to_string())?;
+    let key = if json_object(object, &canonical).is_some() {
+        canonical.clone()
+    } else if json_object(object, model).is_some() {
+        model.to_string()
+    } else {
+        String::new()
+    };
+    let next_object = if key.is_empty() {
+        insert_raw_into_object(object, &canonical, &entry_body)?
+    } else {
+        let entry = json_object(object, &key).ok_or_else(|| "model entry".to_string())?;
+        let (entry_start, entry_end) =
+            slice_bounds(object, entry).ok_or_else(|| "model entry".to_string())?;
+        let next_entry = if let Some(replaced) = replace_json_key(entry, "effortLevel", effort) {
+            replaced
+        } else {
+            insert_raw_into_object(entry, "effortLevel", &format!("\"{effort}\""))?
+        };
+        let mut updated = String::new();
+        updated.push_str(&object[..entry_start]);
+        updated.push_str(&next_entry);
+        updated.push_str(&object[entry_end..]);
+        updated
+    };
+    let mut out = String::new();
+    out.push_str(&text[..start]);
+    out.push_str(&next_object);
+    out.push_str(&text[end..]);
+    Ok(out)
+}
+
+fn model_effort(settings: &str, model: &str) -> Option<String> {
+    let object = json_object(settings, "modelSettings")?;
+    let canonical = claude_canonical(model);
+    let entry = json_object(object, &canonical).or_else(|| json_object(object, model))?;
+    json_string(entry, "effortLevel")
 }
 
 fn replace_toml_value(text: &str, key: &str, value: &str, section: &str) -> Option<String> {
@@ -490,6 +607,139 @@ fn insert_root_key(text: &str, key: &str, value: &str) -> Result<String, String>
     Ok(next)
 }
 
+fn insert_root_raw(text: &str, key: &str, raw_value: &str) -> Result<String, String> {
+    let close = object_close(text).ok_or_else(|| "not an object".to_string())?;
+    let comma = if text[..close].trim_end().ends_with('{') {
+        ""
+    } else {
+        ","
+    };
+    let mut next = String::new();
+    next.push_str(&text[..close]);
+    next.push_str(&format!("{comma}\n  \"{key}\": {raw_value}\n"));
+    next.push_str(&text[close..]);
+    Ok(next)
+}
+
+fn insert_raw_into_object(object: &str, key: &str, raw_value: &str) -> Result<String, String> {
+    let close = object_close(object).ok_or_else(|| "not an object".to_string())?;
+    let comma = if object[..close].trim_end().ends_with('{') {
+        ""
+    } else {
+        ","
+    };
+    let mut next = String::new();
+    next.push_str(&object[..close]);
+    next.push_str(&format!("{comma}\"{key}\":{raw_value}"));
+    next.push_str(&object[close..]);
+    Ok(next)
+}
+
+fn object_close(text: &str) -> Option<usize> {
+    let start = text.find('{')?;
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    for (offset, ch) in text[start..].char_indices() {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn replace_depth1_string(text: &str, key: &str, value: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    for (idx, ch) in text.char_indices() {
+        if in_str {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                if depth == 1
+                    && text[idx..].starts_with(&needle)
+                    && let Some(next) = replace_json_key_at(text, idx, &needle, value)
+                {
+                    return Some(next);
+                }
+                in_str = true;
+            }
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn replace_json_key_at(text: &str, at: usize, needle: &str, value: &str) -> Option<String> {
+    if !text[at..].starts_with(needle) {
+        return None;
+    }
+    let rest = &text[at + needle.len()..];
+    let rest_trim = rest.trim_start();
+    let ws1 = rest.len() - rest_trim.len();
+    if !rest_trim.starts_with(':') {
+        return None;
+    }
+    let after_colon = &rest_trim[1..];
+    let after_trim = after_colon.trim_start();
+    let ws2 = after_colon.len() - after_trim.len();
+    if !after_trim.starts_with('"') {
+        return None;
+    }
+    let val_start = at + needle.len() + ws1 + 1 + ws2 + 1;
+    let end = text[val_start..].find('"')?;
+    let mut next = String::with_capacity(text.len() + value.len());
+    next.push_str(&text[..val_start]);
+    next.push_str(value);
+    next.push_str(&text[val_start + end..]);
+    Some(next)
+}
+
+fn slice_bounds(text: &str, slice: &str) -> Option<(usize, usize)> {
+    let base = text.as_ptr() as usize;
+    let at = slice.as_ptr() as usize;
+    if at < base {
+        return None;
+    }
+    let start = at - base;
+    let end = start + slice.len();
+    if end <= text.len() && text.is_char_boundary(start) && text.get(start..end) == Some(slice) {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
 fn plan_waiting(dir: &Path) -> Option<bool> {
     let text = fs::read_to_string(dir.join("plan_mode.json")).ok()?;
     Some(json_bool(&text, "awaiting_plan_approval"))
@@ -533,12 +783,46 @@ fn safe_tool(name: &str) -> String {
     if tool.is_empty() { "tool".into() } else { tool }
 }
 
-fn pid_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
         return false;
     }
-    let rc = unsafe { libc::kill(pid as i32, 0) };
-    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(unix)]
+    {
+        if pid > i32::MAX as u32 {
+            return false;
+        }
+        let rc = unsafe { libc::kill(pid as i32, 0) };
+        return rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+    #[cfg(windows)]
+    {
+        windows_pid_alive(pid)
+    }
+}
+
+#[cfg(windows)]
+fn windows_pid_alive(pid: u32) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
+        fn GetExitCodeProcess(process: *mut core::ffi::c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE
+    }
 }
 
 pub fn percent_decode(text: &str) -> String {
@@ -717,9 +1001,11 @@ pub struct Face {
     pub model: String,
     pub effort: String,
     pub permission: String,
+    pub ultra: bool,
 }
 
 pub fn face(home: &Path, dir: &Path, agent: AgentKind, permit: Permit) -> Face {
+    let mut ultra = false;
     let (model, effort, permission) = match agent {
         AgentKind::Grok => {
             let text = read_cap(&home.join(".grok/config.toml"));
@@ -732,11 +1018,13 @@ pub fn face(home: &Path, dir: &Path, agent: AgentKind, permit: Permit) -> Face {
         AgentKind::Claude => {
             let settings = read_cap(&home.join(".claude/settings.json"));
             let local = read_cap(&dir.join(".claude/settings.local.json"));
-            (
-                json_string(&local, "model"),
-                json_string(&settings, "effortLevel"),
-                json_string(&local, "defaultMode"),
-            )
+            let model = json_string(&local, "model").or_else(|| json_string(&settings, "model"));
+            let effort = model
+                .as_deref()
+                .and_then(|name| model_effort(&settings, name))
+                .or_else(|| json_string(&settings, "effortLevel"));
+            ultra = json_bool(&settings, "ultracode");
+            (model, effort, json_string(&local, "defaultMode"))
         }
         AgentKind::Codex => {
             let text = read_cap(&home.join(".codex/config.toml"));
@@ -756,6 +1044,7 @@ pub fn face(home: &Path, dir: &Path, agent: AgentKind, permit: Permit) -> Face {
         model: model.unwrap_or_else(|| "—".into()),
         effort: effort.unwrap_or_else(|| "—".into()),
         permission,
+        ultra,
     }
 }
 
@@ -883,15 +1172,46 @@ mod tests {
         )
         .unwrap();
         apply_model(&home, &dir, Some(AgentKind::Grok), "grok-4.7");
-        apply_effort(&home, AgentKind::Claude, "max");
+        let skipped = apply_effort(&home, AgentKind::Claude, "max", "opus");
+        assert!(skipped.contains("session"), "{skipped}");
+        let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        assert!(claude.contains("\"effortLevel\":\"medium\""), "{claude}");
+        assert!(!claude.contains("modelSettings"), "{claude}");
+        apply_model(&home, &dir, Some(AgentKind::Claude), "opus");
+        assert!(!dir.join(".claude/settings.local.json").exists());
+        apply_effort(&home, AgentKind::Claude, "high", "opus[1m]");
         let grok = fs::read_to_string(home.join(".grok/config.toml")).unwrap();
         assert!(grok.contains("default = \"grok-4.7\""));
         assert!(grok.contains("default_reasoning_effort = \"medium\""));
         let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
-        assert!(claude.contains("\"effortLevel\":\"max\""));
-        assert!(claude.contains("\"hooks\":{\"keep\":true}"));
+        assert!(claude.contains("\"effortLevel\":\"high\""), "{claude}");
+        assert!(claude.contains("claude-opus-5-5"), "{claude}");
+        assert!(claude.contains("\"hooks\":{\"keep\":true}"), "{claude}");
+        assert!(claude.contains("\"model\": \"opus\""), "{claude}");
+        assert!(!claude.contains("\"max\""), "{claude}");
+        apply_effort(&home, AgentKind::Claude, "xhigh", "opus");
+        let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        assert!(claude.contains("\"effortLevel\":\"xhigh\""), "{claude}");
+        assert_eq!(claude.matches("claude-opus-5-5").count(), 1, "{claude}");
+        assert!(claude.contains("\"hooks\":{\"keep\":true}"), "{claude}");
         let codex = fs::read_to_string(home.join(".codex/config.toml")).unwrap();
         assert!(codex.contains("model = \"old\""));
+        let saved = claude.clone();
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(
+            dir.join(".claude/settings.local.json"),
+            "{\"permissions\":{\"defaultMode\":\"plan\"}}\n",
+        )
+        .unwrap();
+        apply_model(&home, &dir, Some(AgentKind::Claude), "sonnet");
+        let local = fs::read_to_string(dir.join(".claude/settings.local.json")).unwrap();
+        assert!(local.contains("\"model\": \"sonnet\""), "{local}");
+        assert!(local.contains("defaultMode"), "{local}");
+        assert_eq!(local.matches("\"model\"").count(), 1, "{local}");
+        let claude = fs::read_to_string(home.join(".claude/settings.json")).unwrap();
+        assert!(claude.contains("\"model\": \"sonnet\""), "{claude}");
+        assert!(claude.contains("\"hooks\":{\"keep\":true}"), "{claude}");
+        assert!(claude.contains("claude-opus-5-5"), "{saved}");
         let _ = fs::remove_dir_all(home);
         let _ = fs::remove_dir_all(dir);
     }

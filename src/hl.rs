@@ -30,6 +30,13 @@ pub fn paint_ext(line: &str, ext: &str) -> String {
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             emit(&mut out, &mut color, COMMENT, &line[i..]);
             break;
+        } else if bytes[i] == b'-'
+            && i + 1 < bytes.len()
+            && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'-')
+        {
+            let end = end_flag(bytes, i);
+            emit(&mut out, &mut color, INTEGER, &line[i..end]);
+            i = end;
         } else if bytes[i] == b'"' {
             let end = end_string(line, i);
             emit(&mut out, &mut color, STRING, &line[i..end]);
@@ -83,6 +90,7 @@ fn hash_comment(ext: &str) -> bool {
 
 fn is_keyword(word: &str, ext: &str) -> bool {
     match ext {
+        "out" => false,
         "py" => matches!(
             word,
             "def"
@@ -258,6 +266,28 @@ fn end_ident(bytes: &[u8], start: usize) -> usize {
     i
 }
 
+fn end_flag(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() && bytes[i] == b'-' {
+        i += 1;
+    }
+    while i < bytes.len() && (is_ident_continue(bytes[i]) || bytes[i] == b'.') {
+        i += 1;
+    }
+    i
+}
+
+pub fn paint_shell_line(line: &str) -> String {
+    if line.contains('\u{1b}') {
+        return line.to_string();
+    }
+    if let Some(cmd) = line.strip_prefix("> ") {
+        let body = paint_ext(cmd, "sh");
+        return format!("\x1b[38;5;51m$\x1b[0;48;5;0m {body}");
+    }
+    paint_ext(line, "out")
+}
+
 fn end_integer(bytes: &[u8], start: usize) -> usize {
     let mut i = start;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -358,6 +388,12 @@ fn starts_token(bytes: &[u8], i: usize) -> bool {
     if byte == b'"' || byte == b'\'' || byte.is_ascii_digit() || is_ident_start(byte) {
         return true;
     }
+    if byte == b'-'
+        && i + 1 < bytes.len()
+        && (bytes[i + 1].is_ascii_alphanumeric() || bytes[i + 1] == b'-')
+    {
+        return true;
+    }
     byte == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/'
 }
 
@@ -388,5 +424,16 @@ mod tests {
         assert!(paint_ext("if true; then", "sh").contains("38;5;196"));
         assert!(paint_ext("/* hide */ fn", "rs").contains("38;5;67"));
         assert_eq!(paint_ext("if this is prose", ""), "if this is prose");
+    }
+
+    #[test]
+    fn shell_lines_color_commands_flags_and_strings() {
+        let command = paint_shell_line("> if true; then");
+        assert!(command.contains("38;5;51m$"), "{command}");
+        assert!(command.contains("38;5;196mif"), "{command}");
+        let listing = paint_shell_line("ls -l \"src\"");
+        assert!(listing.contains("38;5;45m-l"), "{listing}");
+        assert!(listing.contains("38;5;39m\"src\""), "{listing}");
+        assert!(!listing.contains("48;5;17"), "{listing}");
     }
 }
