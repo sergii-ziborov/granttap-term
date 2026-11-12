@@ -1,6 +1,6 @@
 {
   "name": "granttap-local",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "GrantTap Local: offline MCP for the GrantTap Term desk. One computer, no server.",
   "bin": {
     "granttap-local": "bin/granttap-local.js"

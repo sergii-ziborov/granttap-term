@@ -1,112 +1,112 @@
 # GrantTap Term
 
-Стол для одной машины. Он запускается внутри уже открытого терминала: Windows Terminal, iTerm или сессия SSH. Своего окна нет. Это не эмулятор терминала и не сервер GrantTap.
+A desk for one machine. It runs inside a terminal that is already open: Windows Terminal, iTerm, or an SSH session. It has no window of its own. It is not a terminal emulator and it is not the GrantTap server.
 
-На одном компьютере стол показывает чаты Grok, Claude и Codex, очередь задач, меш репозиториев Weavatrix, файлы, браузер, уроки и вкладку Term. Агенты остаются на этой машине.
+On one computer the desk shows Grok, Claude, and Codex chats, a task queue, the Weavatrix repository mesh, files, a browser, lessons, and a Term tab. The agents stay on this machine.
 
-Вкладка чатов называется `now`. Открытый разговор стоит справа, список сессий слева. У списка и у разговора свои полосы прокрутки. Колесо над списком двигает список, колесо над разговором двигает разговор. Вверху справа `[settings]` и `[help]`. Внизу вкладки: now, Tasks, Mesh, Files, Browser, Lessons, Term.
+The chat tab is `now`. The open talk is on the right, the session list is on the left. The list and the talk have their own scrollbars. The wheel over the list moves the list. The wheel over the talk moves the talk. The top right has `[settings]` and `[help]`. The bottom tabs are now, Tasks, Mesh, Files, Browser, Lessons, and Term.
 
-Правки репозитория над разговором начинаются одной строкой `▶  +N  −M`. Клик раскрывает папки и файлы. Нулевые `+0 −0` не показываются. Если список выше экрана, открытая строка остаётся наверху, а прокрутка к более ранним репликам не уводит этот список с места.
+Repository edits above the talk start as one row, `▶  +N  −M`. A click expands folders and files. Files at `+0 −0` stay hidden. When the list is taller than the screen, the opened row stays at the top, and scrolling back to older lines does not slide that list away.
 
-Облик по умолчанию — cyberpunk: чёрное поле, красный, синий и золото. В Settings ещё cyberdeck, parchment, ink, dos и linux. Тема страницы браузера отдельно: auto, dark, light. Шрифт консоли: Consolas, Cascadia Mono или Lucida Console, высота клетки 12, 16, 20 или 24.
+The default look is cyberpunk: a black field, red, blue, and gold. Settings also has cyberdeck, parchment, ink, dos, and linux. The browser page theme is separate: auto, dark, and light. The console font is Consolas, Cascadia Mono, or Lucida Console, with a cell height of 12, 16, 20, or 24.
 
-Спецификация лежит в папке `план`.
+The specification is in the `план` folder.
 
 ## GrantTap Local
 
-Локальный MCP называется **granttap-local**. Это не сервер GrantTap и не облачный вход. По stdio это одна машина, JSON-RPC по строкам, без OAuth. Имя в `initialize` — `granttap-local`, версия `1.0.0`.
+The local MCP is named **granttap-local**. It is not the GrantTap server and it is not a cloud login. Over stdio it is one machine, line-delimited JSON-RPC, with no OAuth. The `initialize` name is `granttap-local` and the version is `1.0.0`.
 
-Программа стола называется `granttap-term`. Тот же бинарник поднимает MCP:
+The desk program is named `granttap-term`. The same binary serves MCP:
 
 ```
 granttap-term mcp
 ```
 
-Пока стол открыт, тот же помощник слушает `http://127.0.0.1:17342/mcp`. Проверка: `http://127.0.0.1:17342/healthz`.
+While the desk is open, the same helper listens on `http://127.0.0.1:17342/mcp`. Health check: `http://127.0.0.1:17342/healthz`.
 
-Пакет npm `granttap-local` ставит ту же программу и запускает её как MCP. Сборка пакета — darwin arm64.
+The npm package `granttap-local` installs that program and runs it as MCP. The package build is darwin arm64.
 
 ```
 npx granttap-local
 ```
 
-Инструменты: `list_chats`, `preview_image`, `git_history`, `git_read_blob`, `browse_page`, `list_mesh`, `list_skills`, `read_handoff`, `read_skill`, `browser_session`, `browser_act`. `read_handoff` принимает `chat`. `read_skill` принимает `skill`. `browser_act` принимает `action`.
+Tools: `list_chats`, `preview_image`, `git_history`, `git_read_blob`, `browse_page`, `list_mesh`, `list_skills`, `read_handoff`, `read_skill`, `browser_session`, `browser_act`. `read_handoff` takes `chat`. `read_skill` takes `skill`. `browser_act` takes `action`.
 
-## Запуск стола
+## Run the desk
 
-Из каталога репозитория:
+From the repository directory:
 
 ```
 cargo run
 ```
 
-Без терминала программа пишет `granttap-term: run this inside a terminal` и выходит. `granttap-term mcp` работает и по трубе.
+Without a terminal the program prints `granttap-term: run this inside a terminal` and exits. `granttap-term mcp` also works on a pipe.
 
-Клавиши: стрелки и мышь двигают курсор, Enter открывает строку или отправляет команду, Esc закрывает оверлей. F2 и F4 правят файл в Vim, F3 или `[full]` раскрывают чат, F5 обновляет меш и открытую страницу, F6 переключает say и queue, F10 выходит сразу. Ctrl+C выходит со второго нажатия. Перетаскивание копирует клетки под указателем. Ctrl+V и Alt+V вставляют текст, файл или картинку. Полный список открывает `[help]` или `?` на пустой строке.
+Keys: arrows and the mouse move the cursor, Enter opens a row or sends a command, Esc closes an overlay. F2 and F4 edit a file in Vim, F3 or `[full]` expands the chat, F5 refreshes the mesh and the open page, F6 toggles say and queue, F10 quits immediately. Ctrl+C quits on the second press. A drag copies the cells under the pointer. Ctrl+V and Alt+V paste text, a file, or a picture. The full list is `[help]`, or `?` on an empty line.
 
-Картинка в чате рисуется секстантами. Клик открывает её в рамке, повторный клик по рамке чат не закрывает. Клик по файлу в чате открывает текст в такой же рамке.
+A picture in a chat is drawn in sextants. A click opens it in a frame. A second click on the frame does not close the chat. A click on a file in the chat opens the text in the same kind of frame.
 
-## Экраны
+## Screens
 
-Снимки сняты с текстового кадра стола, 96×28.
+The frames are 96×28.
 
-Чаты. Живой чат Grok берётся из `active_sessions.json`, если процесс ещё жив. Claude и Codex живые только когда процесс с именем `claude` или `codex` несёт этот идентификатор. Заголовок Grok читается из `summary.json`. В списке по десять последних чатов каждого агента.
+Chats. A live Grok chat comes from `active_sessions.json` when that process is still alive. Claude and Codex are live only when a process named `claude` or `codex` carries that id. The Grok title is read from `summary.json`. The list keeps the ten newest chats for each agent.
 
-![Чаты](screen/chats.png)
+![Chats](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/chats.png)
 
-Задачи. У задачи один владелец, одна модель и один уровень усилия. Строка задачи открывает сплит в виде этого агента. Сверху работающие чаты, ниже те, что ждут.
+Tasks. A task has one owner, one model, and one effort. Opening a task row splits as that agent. Working chats are above, waiting ones are below.
 
-![Очередь](screen/tasks.png)
+![Queue](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/tasks.png)
 
-![Задача](screen/task.png)
+![Task](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/task.png)
 
-Меш — это репозитории, которые Weavatrix связал общими коммитами, а не чат. Строка показывает короткий измеритель, число строк и символов. Дороги идут по `mod`, `use crate::`, `use super::` и относительному импорту JS. Красный `!` называет отсутствующий файл. Внешние зависимости — отдельные полосы. Имена из `.env.example` видны, значения нет. Если связей нет, стол пишет `none`.
+The mesh is repositories Weavatrix linked by shared commits, not a chat. A row shows a short meter, the line count, and the byte count. Roads follow `mod`, `use crate::`, `use super::`, and relative JS imports. A red `!` names a missing file. External dependencies are separate bands. Names from `.env.example` are visible. Values are not. When there are no links, the desk writes `none`.
 
-![Меш](screen/mesh.png)
+![Mesh](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/mesh.png)
 
-Файлы и редактор. У типа файла свой знак. Vim показывает, где файл, когда он менялся и что это за коммит. Отличие от HEAD помечено. Подсветка зависит от расширения: Rust, Python, JavaScript, TypeScript, Go, shell, C.
+Files and the editor. Each file type has its own mark. Vim shows where the file is, when it changed, and which commit that is. The difference from HEAD is marked. Highlighting follows the extension: Rust, Python, JavaScript, TypeScript, Go, shell, and C.
 
-![Файлы](screen/files.png)
+![Files](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/files.png)
 
-![Редактор](screen/editor.png)
+![Editor](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/editor.png)
 
-Браузер рисует локальный файл или страницу `http`/`https`. Страницу раскладывает headless Edge. Если Edge не ответил, остаётся текстовый разбор. В шапке тема и язык. На полосе назад, вперёд, обновление, закладка, история, js и live.
+The browser draws a local file or an `http`/`https` page. Headless Edge lays the page out. When Edge does not answer, the text parser remains. The header has the theme and the language. The bar is back, forward, reload, bookmark, history, js, and live.
 
-![Браузер](screen/browser.png)
+![Browser](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/browser.png)
 
-Уроки: стол, Claude, терминал и Kubernetes. Отдельного экрана подов нет.
+Lessons: the desk, Claude, the terminal, and Kubernetes. There is no separate pods screen.
 
-![Уроки](screen/lessons.png)
+![Lessons](https://raw.githubusercontent.com/sergii-ziborov/granttap-term/main/screen/lessons.png)
 
-## Команды
+## Commands
 
-Над строкой ввода висят подсказки, когда строка пустая в открытом чате или начинается с `/`. Под ней — короткое описание. `desc` открывает описание в нижнем сплите. История команд хранится в `~/.granttap-term/desk.txt`.
+Suggestions sit above the prompt when the line is empty in an open chat, or when it starts with `/`. A short description sits under the suggestion. `desc` opens that description in the bottom split. Command history is in `~/.granttap-term/desk.txt`.
 
-| Команда | Что делает |
+| Command | What it does |
 | --- | --- |
-| `chats` `tasks` `mesh` `files` `browser` `lessons` `term` | Переключает вкладку |
-| `task <название>` | Ставит задачу текущему агенту |
-| `move grok` `move claude` `move codex` | Передаёт выбранный чат. Пишет `~/.granttap-term/handoff/` и открывает сплит. Хранилища сессий агентов не переписывает |
-| `open` `context` | Открывает чат. `context` добавляет записанный контекст |
-| `accept ask` `safe` `except-push` `except-destructive` `full` | Автоакцепт для этого меша и выбранного чата |
-| `pause` | Ставит автоакцепт на паузу |
-| `permit ask` `edits` `bypass` `plan` | Пишет режим в конфиг выбранного агента |
-| `model <имя>` `effort <уровень>` | Пишет модель и усилие только выбранному агенту |
-| `image <путь>` | Клеточный предпросмотр картинки |
-| `browse <файл или url>` | Страница в сплите |
-| `history` `blob <путь>` | Чтение git через Weavatrix |
-| `health roads` `health extern` | Включает дороги и внешние полосы у этого меша |
-| `skill <имя>` | Открывает `SKILL.md` |
-| `commit` | `git commit`. Ничего не добавляет в индекс |
-| `push` | `git push` без лишних флагов |
-| `fill` | Раскрывает сплит или сворачивает его |
+| `chats` `tasks` `mesh` `files` `browser` `lessons` `term` | Switches the tab |
+| `task <name>` | Queues a task for the current agent |
+| `move grok` `move claude` `move codex` | Hands the selected chat over. Writes `~/.granttap-term/handoff/` and opens a split. Does not rewrite the agent session stores |
+| `open` `context` | Opens the chat. `context` adds the recorded context |
+| `accept ask` `safe` `except-push` `except-destructive` `full` | Auto-accept for this mesh and the selected chat |
+| `pause` | Pauses auto-accept |
+| `permit ask` `edits` `bypass` `plan` | Writes the mode into the selected agent's config |
+| `model <name>` `effort <level>` | Writes the model and the effort only for the selected agent |
+| `image <path>` | Cell preview of a picture |
+| `browse <file or url>` | A page in the split |
+| `history` `blob <path>` | Git read through Weavatrix |
+| `health roads` `health extern` | Turns on roads and external bands for this mesh |
+| `skill <name>` | Opens `SKILL.md` |
+| `commit` | `git commit`. Adds nothing to the index |
+| `push` | `git push` with no extra flags |
+| `fill` | Expands the split or collapses it |
 
-`ask` и `safe` не выполняют запись сразу. Первый Enter оставляет команду и пишет, что её нужно повторить. Второй Enter выполняет. То же при паузе. `except-push`, `except-destructive` и `full` выполняют `permit`, `model`, `effort`, `commit` и правку F4 сразу. `push` сразу проходит только на `except-destructive` и `full`. Отдельной разрушающей git-команды нет.
+`ask` and `safe` do not write on the first Enter. The first Enter leaves the command and says to repeat it. The second Enter runs it. The same applies while paused. `except-push`, `except-destructive`, and `full` run `permit`, `model`, `effort`, `commit`, and the F4 edit immediately. `push` passes immediately only on `except-destructive` and `full`. There is no separate destructive git command.
 
-`permit` пишет Grok `[ui] permission_mode`, верхний `approval_policy` Codex и `permissions.defaultMode` в `.claude/settings.local.json` проекта. Файл `~/.claude/settings.json` стол не переписывает. Модель и усилие Claude пишутся в настройки проекта. У Grok это `[models] default` и `default_reasoning_effort`.
+`permit` writes Grok `[ui] permission_mode`, the top Codex `approval_policy`, and `permissions.defaultMode` in the project's `.claude/settings.local.json`. The desk does not rewrite `~/.claude/settings.json`. Claude model and effort go to the project settings. For Grok that is `[models] default` and `default_reasoning_effort`.
 
-## Что стол показывает честно
+## What the desk shows honestly
 
-Нет файла `active_sessions.json` — строка `no data`. Файл есть, а живого вопроса нет — `none`. Вопросы Grok читаются из короткого хвоста сессии и из ожидания плана. Квоту стол не выдумывает: видны только уже записанные токены. Рабочий стол Claude и Codex не считается живым чатом CLI.
+No `active_sessions.json` file means the line `no data`. The file is present but there is no live question means `none`. Grok questions are read from a short session tail and from plan wait. The desk does not invent quota: only tokens that are already recorded are shown. The Claude and Codex desktops are not counted as a live CLI chat.
 
-Связанные репозитории появляются только когда Weavatrix видит общие коммиты. Иначе строка `Linked repos none`.
+Linked repositories appear only when Weavatrix sees shared commits. Otherwise the line is `Linked repos none`.
